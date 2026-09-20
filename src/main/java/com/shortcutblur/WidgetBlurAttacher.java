@@ -1,9 +1,6 @@
 package com.shortcutblur;
 
-import android.content.Context;
-import android.content.ContextWrapper;
 import android.view.View;
-import android.view.ViewGroup;
 
 import java.lang.reflect.Method;
 
@@ -14,113 +11,97 @@ public class WidgetBlurAttacher {
     private static final int CONTAINER_ID = 0x7f0a02ab;
 
     private static final java.util.WeakHashMap<View, Boolean> sDone = new java.util.WeakHashMap<View, Boolean>();
+    /** host -> the container we already bound to it; lets us skip repeat work when nothing changed. */
+    private static final java.util.WeakHashMap<View, View> sDoneHost = new java.util.WeakHashMap<View, View>();
 
-    public static void attach(String tag, View root, ClassLoader cl) {
+    private static final long ATTACH_RETRY_MS = 120L;
+    private static final int ATTACH_MAX_RETRY = 8;
+    /** Roots that failed all retries AND never contained the clock container: stop re-trying. */
+    private static final java.util.WeakHashMap<View, Boolean> sGaveUp = new java.util.WeakHashMap<View, Boolean>();
+    /** True once a root ever showed hasT=true, so we can re-arm a previously given-up root. */
+    private static final java.util.WeakHashMap<View, Boolean> sEverHit = new java.util.WeakHashMap<View, Boolean>();
+
+    /** Entry: try once, then retry (for Launcher reload where widget children inflate late). */
+    public static void attach(final String tag, final View root, final ClassLoader cl) {
+        attach(tag, root, cl, 0);
+    }
+
+    private static void attach(final String tag, final View root, final ClassLoader cl, final int attempt) {
+
         if (root == null) return;
         try {
-            View host = findHost(root);
-            if (host == null) { Logger.log("BW " + tag + " host not found"); return; }
-            Object launcher = findLauncher(host.getContext());
-            if (launcher == null) { Logger.log("BW no launcher"); return; }
-            Logger.log("BW " + tag + " launcher=" + launcher);
-
-            View container = findViewByIdRecursive(root, TARGET_ROOT);
-            if (container == null) { container = findViewByIdRecursive(root, CONTAINER_ID); }
-            if (container == null) { Logger.log("BW target not found"); return; }
-            synchronized (sDone) {
-                if (Boolean.TRUE.equals(sDone.get(container))) { Logger.log("BW skip(done)"); return; }
-                sDone.put(container, Boolean.TRUE);
+            View host = ViewUtils.ancestorOfType(root, "AppWidgetHostView");
+            View containerEarly = ViewUtils.findByViewId(root, TARGET_ROOT);
+            boolean hasT = (containerEarly != null);
+            if (hasT) {
+                synchronized (sEverHit) { sEverHit.put(root, Boolean.TRUE); }
+                synchronized (sGaveUp) { sGaveUp.remove(root); }
+            } else {
+                if (Boolean.TRUE.equals(sGaveUp.get(root))) return;
+                if (attempt >= ATTACH_MAX_RETRY && !Boolean.TRUE.equals(sEverHit.get(root))) {
+                    synchronized (sGaveUp) { sGaveUp.put(root, Boolean.TRUE); }
+                    return;
+                }
             }
-            Logger.log("BW container=" + container.getClass().getName() + " " + container.getWidth() + "x" + container.getHeight());
-            try { container.setTag("OplusBlurBg"); } catch (Throwable t) { Logger.log("BW setTag FAIL: " + t); }
+            if (host == null) { ModuleLog.e("BW", tag + " host not found", null); return; }
+            Object launcher = ViewUtils.contextOfType(host.getContext(), "com.android.launcher.Launcher");
+            if (launcher == null) { ModuleLog.e("BW", "no launcher", null); return; }
+
+            View container = containerEarly;
+            if (container == null) { container = ViewUtils.findByViewId(root, CONTAINER_ID); }
+            if (container == null) {
+                if (attempt < ATTACH_MAX_RETRY && root != null) {
+                    root.postDelayed(new Runnable() {
+                        @Override public void run() { attach(tag, root, cl, attempt + 1); }
+                    }, ATTACH_RETRY_MS);
+                }
+                return;
+            }
+            synchronized (sDone) {
+                View bound = sDoneHost.get(host);
+                if (bound == container || Boolean.TRUE.equals(sDone.get(container))) {
+                    return;
+                }
+                sDone.put(container, Boolean.TRUE);
+                sDoneHost.put(host, container);
+            }
+            ModuleLog.d("BW", "container=" + container.getClass().getName() + " " + container.getWidth() + "x" + container.getHeight());
+            try { container.setTag("OplusBlurBg"); } catch (Throwable t) { ModuleLog.e("BW", "setTag fail", t); }
             boolean ok = tryCardBlurManager(launcher, container);
             if (!ok) ok = tryCreateViaHost(host, container);
-            Logger.log("BW final ok=" + ok);
+            ModuleLog.d("BW", "final ok=" + ok);
             GlyphBlurRenderer.attachGlyphBlur(container, container.getContext().getClassLoader());
         } catch (Throwable t) {
-            Logger.log("BW attach FAIL: " + t);
+            ModuleLog.e("BW", "attach fail", t);
         }
     }
 
     private static boolean tryCardBlurManager(Object launcher, View target) {
         try {
-            Object mgr = invoke(launcher, "getCardBlurManager");
-            if (mgr == null) { Logger.log("BW cardBlurManager null"); return false; }
-            Method m = findMethod(mgr.getClass(), "createBlurForView", 3);
-            if (m == null) { Logger.log("BW createBlurForView m null"); return false; }
+            Object mgr = Reflect.call(launcher, "getCardBlurManager");
+            if (mgr == null) { ModuleLog.e("BW", "cardBlurManager null", null); return false; }
+            Method m = Reflect.method(mgr.getClass(), "createBlurForView", 3);
+            if (m == null) { ModuleLog.e("BW", "createBlurForView not found", null); return false; }
             Object r = m.invoke(mgr, target, null, TYPE_WIDGET);
-            Logger.log("BW createBlurForView(target) => " + r);
+            ModuleLog.d("BW", "createBlurForView => " + r);
             return Boolean.TRUE.equals(r);
         } catch (Throwable t) {
-            Logger.log("BW CardBlur FAIL: " + t);
+            ModuleLog.e("BW", "cardBlur fail", t);
             return false;
         }
     }
 
     private static boolean tryCreateViaHost(View host, View target) {
         try {
-            Method m = findMethod(host.getClass(), "createBlurForView", 1);
+            Method m = Reflect.method(host.getClass(), "createBlurForView", 1);
             if (m == null) return false;
             m.invoke(host, target);
-            Logger.log("BW host.createBlurForView(target) OK");
+            ModuleLog.d("BW", "host.createBlurForView ok");
             return true;
         } catch (Throwable t) {
-            Logger.log("BW hostCreate FAIL: " + t);
+            ModuleLog.e("BW", "hostCreate fail", t);
             return false;
         }
     }
 
-    private static Object invoke(Object o, String name) {
-        try { return o.getClass().getMethod(name).invoke(o); }
-        catch (Throwable t) { Logger.log("BW invoke " + name + " fail: " + t); return null; }
-    }
-
-    private static View findHost(View v) {
-        View cur = v;
-        int g = 0;
-        while (cur != null && g++ < 50) {
-            if (cur.getClass().getName().contains("AppWidgetHostView")) return cur;
-            if (cur.getParent() instanceof View) cur = (View) cur.getParent();
-            else break;
-        }
-        return null;
-    }
-
-    private static Object findLauncher(Context ctx) {
-        Context c = ctx;
-        int g = 0;
-        while (c != null && g++ < 30) {
-            if (c.getClass().getName().equals("com.android.launcher.Launcher")) return c;
-            if (c instanceof ContextWrapper) c = ((ContextWrapper) c).getBaseContext();
-            else break;
-        }
-        return null;
-    }
-
-    private static Method findMethod(Class<?> c, String name, int params) {
-        Class<?> k = c;
-        int g = 0;
-        while (k != null && g++ < 10) {
-            for (Method m : k.getDeclaredMethods()) {
-                if (m.getName().equals(name) && m.getParameterTypes().length == params) {
-                    m.setAccessible(true);
-                    return m;
-                }
-            }
-            k = k.getSuperclass();
-        }
-        return null;
-    }
-
-    private static View findViewByIdRecursive(View v, int id) {
-        if (v.getId() == id) return v;
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                View r = findViewByIdRecursive(g.getChildAt(i), id);
-                if (r != null) return r;
-            }
-        }
-        return null;
-    }
 }

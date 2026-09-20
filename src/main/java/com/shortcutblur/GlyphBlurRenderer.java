@@ -14,12 +14,22 @@ public class GlyphBlurRenderer {
     private static final int MAX_RETRY = 12;
     private static final float GLYPH_DY = 0.0f;
     private static final long RETRY_DELAY_MS = 120L;
+    private static final long POLL_INTERVAL_ON_MS = 500L;
+    private static final long POLL_INTERVAL_OFF_MS = 3000L;
+    private static final long POLL_INTERVAL_HIDDEN_MS = 1500L;
+    private static final long POLL_INTERVAL_MAX_MS = 2000L;
+    private static final long POLL_INTERVAL_TICK_MS = 500L;
+    private static final int  POLL_STABLE_THRESHOLD = 6;
+
 
     private static final int ID_HOUR    = 0x7f0a02cf;
     private static final int ID_COLON   = 0x7f0a02c8;
     private static final int ID_MINUTES = 0x7f0a02d3;
     private static final int ID_DATE    = 0x7f0a02ca;
     private static final int ID_WEATHER = 0x7f0a02da;
+    private static final int ID_WEEK    = 0x7f0a02db;
+    private static final int ID_WEATHER2   = 0x7f0a02d6;
+    private static final int ID_LUNAR   = 0x7f0a02cb;
 
     private static final int ID_WEATHER_IMG1 = 0x7f0a02d9;
     private static final int ID_WEATHER_IMG2 = 0x7f0a0276;
@@ -35,11 +45,62 @@ public class GlyphBlurRenderer {
     }
 
     private static final java.util.WeakHashMap<View, GlyphSnapshot[]> sSnapsMap = new java.util.WeakHashMap<View, GlyphSnapshot[]>();
+    private static volatile boolean sScreenOn = true;
+    private static final java.util.WeakHashMap<View, PollRunner> sRunners = new java.util.WeakHashMap<View, PollRunner>();
+    // icon path cache (keyed by ImageView)
+    // ---- icon path cache (fingerprint keyed: View/Bitmap instances are recreated on every
+    // RemoteViews.reapply, so identity keys never hit. A cheap pixel fingerprint is stable.) ----
+    private static final java.util.HashMap<Integer, Integer> sIconFp = new java.util.HashMap<Integer, Integer>();
+    private static final java.util.HashMap<Integer, Path> sIconFpPath = new java.util.HashMap<Integer, Path>();
+
+    /** Cheap 16-point pixel fingerprint. ~2-8us vs ~111-272us for the full 9216px raster. */
+    private static int iconFingerprint(android.graphics.Bitmap b) {
+        if (b == null || b.isRecycled()) return 0;
+        int w = b.getWidth(), h = b.getHeight();
+        if (w <= 0 || h <= 0) return 0;
+        int hash = 17;
+        hash = hash * 31 + w;
+        hash = hash * 31 + h;
+        for (int iy = 0; iy < 4; iy++) {
+            int y = h * iy / 4;
+            for (int ix = 0; ix < 4; ix++) {
+                hash = hash * 31 + b.getPixel(w * ix / 4, y);
+            }
+        }
+        return hash;
+    }
+    public static void setScreenOn(boolean on) {
+        boolean changed = (sScreenOn != on);
+        sScreenOn = on;
+        if (!changed) return;
+        try {
+            synchronized (sRunners) {
+                for (PollRunner pr : new java.util.ArrayList<PollRunner>(sRunners.values())) pr.onScreenStateChanged();
+            }
+        } catch (Throwable t) { ModuleLog.e("GB", "screenStateChanged fail", t); }
+    }
+
+    public static void notifyContentMaybeChanged(View container) {
+        if (container == null) return;
+        try {
+            PollRunner pr;
+            synchronized (sRunners) { pr = sRunners.get(container); }
+            if (pr != null) pr.kick();
+        } catch (Throwable t) { ModuleLog.e("GB", "kick fail", t); }
+    }
+
+    public static void notifyContentMaybeChangedAll() {
+        try {
+            java.util.List<PollRunner> list;
+            synchronized (sRunners) { list = new java.util.ArrayList<PollRunner>(sRunners.values()); }
+            for (PollRunner pr : list) pr.kick();
+        } catch (Throwable t) { ModuleLog.e("GB", "kickAll fail", t); }
+    }
 
     public static void attachGlyphBlur(final View container, final ClassLoader cl) {
         if (container == null) return;
         try { tryAttachOnce(container, cl, 0); }
-        catch (Throwable t) { Logger.log("GB apply FAIL: " + t); }
+        catch (Throwable t) { ModuleLog.e("GB", "apply fail", t); }
     }
 
     private static void tryAttachOnce(final View container, final ClassLoader cl, final int attempt) {
@@ -47,14 +108,14 @@ public class GlyphBlurRenderer {
             android.graphics.drawable.Drawable bg = container.getBackground();
             if (bg == null) { retry(container, cl, attempt, "bg null"); return; }
             String bgName = bg.getClass().getName();
-            Object blurDrawable = invokeNoArg(bg, "getBlurDrawable");
+            Object blurDrawable = Reflect.call(bg, "getBlurDrawable");
             if (blurDrawable == null) { retry(container, cl, attempt, "bg=" + bgName + " no getBlurDrawable"); return; }
-            Logger.log("GB bg=" + bgName + " blur=" + blurDrawable.getClass().getName());
+            ModuleLog.d("GB", "bg=" + bgName + " blur=" + blurDrawable.getClass().getName());
 
             rebuildSnapshots(container);
             GlyphSnapshot[] snaps = sSnapsMap.get(container);
-            if (snaps == null || snaps.length == 0) { Logger.log("GB snapshot empty"); return; }
-            Logger.log("GB snapshot n=" + snaps.length);
+            if (snaps == null || snaps.length == 0) { return; }
+            ModuleLog.d("GB", "snapshot n=" + snaps.length);
 
             Class<?> iface = Class.forName("com.oplus.posteffect.path.BlurDrawablePathProvider", false, cl);
             Object provider = Proxy.newProxyInstance(cl, new Class<?>[]{ iface }, new InvocationHandler() {
@@ -64,31 +125,31 @@ public class GlyphBlurRenderer {
                             Path out = (Path) args[1];
                             if (out != null) out.set(snapshotsToPath(sSnapsMap.get(container)));
                         }
-                    } catch (Throwable t) { Logger.log("GB proxy getPath FAIL: " + t); }
+                    } catch (Throwable t) { ModuleLog.e("GB", "proxy getPath fail", t); }
                     return null;
                 }
             });
 
-            Method setPP = findMethod(blurDrawable.getClass(), "setPathProvider", 1);
-            if (setPP == null) { Logger.log("GB setPathProvider not found"); return; }
+            Method setPP = Reflect.method(blurDrawable.getClass(), "setPathProvider", 1);
+            if (setPP == null) { ModuleLog.e("GB", "setPathProvider not found", null); return; }
             setPP.setAccessible(true);
             setPP.invoke(blurDrawable, provider);
-            Logger.log("GB setPathProvider OK");
+            ModuleLog.d("GB", "setPathProvider ok");
 
             installRefreshPoller(container, blurDrawable);
 
-            Method inv = findMethod(blurDrawable.getClass(), "invalidatePath", 0);
-            if (inv != null) { inv.setAccessible(true); inv.invoke(blurDrawable); Logger.log("GB invalidatePath OK"); }
+            Method inv = Reflect.method(blurDrawable.getClass(), "invalidatePath", 0);
+            if (inv != null) { inv.setAccessible(true); inv.invoke(blurDrawable); ModuleLog.d("GB", "invalidatePath ok"); }
             container.invalidate();
-            Logger.log("GB DONE container");
+            ModuleLog.d("GB", "done container");
         } catch (Throwable t) {
-            Logger.log("GB tryAttachOnce FAIL(attempt=" + attempt + "): " + t);
+            ModuleLog.e("GB", "tryAttachOnce fail attempt=" + attempt, t);
         }
     }
 
     private static void retry(final View container, final ClassLoader cl, final int attempt, final String why) {
-        if (attempt >= MAX_RETRY) { Logger.log("GB give up: " + why); return; }
-        if (attempt == 0 || attempt == MAX_RETRY - 1) Logger.log("GB retry(" + attempt + "): " + why);
+        if (attempt >= MAX_RETRY) { ModuleLog.e("GB", "give up: " + why, null); return; }
+        if (attempt == 0 || attempt == MAX_RETRY - 1) ModuleLog.d("GB", "retry(" + attempt + "): " + why);
         container.postDelayed(new Runnable() {
             @Override public void run() { tryAttachOnce(container, cl, attempt + 1); }
         }, RETRY_DELAY_MS);
@@ -96,6 +157,8 @@ public class GlyphBlurRenderer {
 
     static void onWidgetUpdated(final View container) {
         if (container == null) return;
+        ModuleLog.d("GB", "poll -> WIDGET_UPDATED (evt: updateAppWidget)");
+        notifyContentMaybeChangedAll();
 
         rebuildSnapshotsNow(container);
 
@@ -112,14 +175,14 @@ public class GlyphBlurRenderer {
         try {
             Object blur = null;
             android.graphics.drawable.Drawable bg = container.getBackground();
-            if (bg != null) blur = invokeNoArg(bg, "getBlurDrawable");
+            if (bg != null) blur = Reflect.call(bg, "getBlurDrawable");
             rebuildSnapshots(container);
             if (blur != null) {
-                Method inv = findMethod(blur.getClass(), "invalidatePath", 0);
+                Method inv = Reflect.method(blur.getClass(), "invalidatePath", 0);
                 if (inv != null) { inv.setAccessible(true); inv.invoke(blur); }
             }
             container.invalidate();
-        } catch (Throwable t) { Logger.log("GB rebuildSnapshotsNow FAIL: " + t); }
+        } catch (Throwable t) { ModuleLog.e("GB", "rebuildSnapshotsNow fail", t); }
     }
 
     private static void appendWeatherIconSnapshots(View container, View base, java.util.ArrayList<GlyphSnapshot> list) {
@@ -128,7 +191,7 @@ public class GlyphBlurRenderer {
             try {
                 View v = container.findViewById(id);
                 if (!(v instanceof android.widget.ImageView)) {
-                    View root = findWidgetProviderRoot(container);
+                    View root = ViewUtils.descendantJustBelow(container, "AppWidgetHostView");
                     if (root != null) v = root.findViewById(id);
                 }
                 if (!(v instanceof android.widget.ImageView)) continue;
@@ -141,6 +204,18 @@ public class GlyphBlurRenderer {
                 }
                 if (bmp == null || bmp.isRecycled()) continue;
                 if (bmp.getWidth() <= 0 || bmp.getHeight() <= 0) continue;
+
+                // ---- icon path cache: bitmap raster is the most expensive part of a rebuild,
+                // but the weather icon only changes a few times a day. Reuse the traced Path.
+                int fp = iconFingerprint(bmp);
+                Integer cFp = sIconFp.get(id);
+                if (cFp != null && cFp.intValue() == fp) {
+                    Path cached = sIconFpPath.get(id);
+                    if (cached != null) {
+                        list.add(new GlyphSnapshot(cached, localOffsetX(v, base), localOffsetY(v, base)));
+                        continue;
+                    }
+                }
 
                 int bw = Math.min(bmp.getWidth(), 96);
                 int bh = Math.max(1, bmp.getHeight() * bw / bmp.getWidth());
@@ -172,46 +247,73 @@ public class GlyphBlurRenderer {
                 android.graphics.Matrix m = new android.graphics.Matrix();
                 m.setScale(sx, sy);
                 iconPath.transform(m);
-                int[] locV = new int[2];
-                int[] locB = new int[2];
-                v.getLocationInWindow(locV);
-                base.getLocationInWindow(locB);
-                float dx = locV[0] - locB[0];
-                float dy = locV[1] - locB[1];
+                float dx = localOffsetX(v, base);
+                float dy = localOffsetY(v, base);
                 list.add(new GlyphSnapshot(iconPath, dx, dy));
-            } catch (Throwable t) { Logger.log("GB iconPath FAIL id=0x" + Integer.toHexString(id) + ": " + t); }
+                sIconFp.put(Integer.valueOf(id), Integer.valueOf(fp));
+                sIconFpPath.put(Integer.valueOf(id), iconPath);
+            } catch (Throwable t) { ModuleLog.e("GB", "iconPath fail id=0x" + Integer.toHexString(id), t); }
         }
     }
 
+    /**
+     * Pure-layout offset of `v` relative to `container` (no window coords, no render
+     * transforms). Accumulates getLeft()/getTop() up the parent chain and subtracts
+     * scroll offsets. This makes glyph paths live in container-local coordinates, so
+     * the system automatically applies any ancestor scale/translation (transition
+     * animations) when rendering -> blur follows the widget without drifting.
+     */
+    static float localOffsetX(View v, View container) {
+        return localOffset(v, container, true);
+    }
+    static float localOffsetY(View v, View container) {
+        return localOffset(v, container, false);
+    }
+    private static float localOffset(View v, View container, boolean horizontal) {
+        if (v == null) return 0f;
+        if (v == container) return 0f;
+        float acc = 0f;
+        View cur = v;
+        int guard = 0;
+        while (cur != null && cur != container && guard++ < 64) {
+            acc += horizontal ? cur.getLeft() : cur.getTop();
+            android.view.ViewParent p = cur.getParent();
+            if (!(p instanceof View)) break;
+            View pv = (View) p;
+            acc -= horizontal ? pv.getScrollX() : pv.getScrollY();
+            cur = pv;
+        }
+        return acc;
+    }
     static void applyIconAlpha(View container) {
         try {
             int[] iconIds = { ID_WEATHER_IMG1, ID_WEATHER_IMG2 };
             for (int id : iconIds) {
                 View v = container.findViewById(id);
                 if (v == null) {
-                    View root = findWidgetProviderRoot(container);
+                    View root = ViewUtils.descendantJustBelow(container, "AppWidgetHostView");
                     if (root != null) v = root.findViewById(id);
                 }
                 if (v != null && Math.abs(v.getAlpha() - ICON_ALPHA) > 0.01f) {
                     v.setAlpha(ICON_ALPHA);
-                    Logger.log("GB iconAlpha id=0x" + Integer.toHexString(id)
+                    ModuleLog.d("GB", "iconAlpha id=0x" + Integer.toHexString(id)
                         + " cls=" + v.getClass().getSimpleName() + " alpha=" + ICON_ALPHA);
                 }
             }
-        } catch (Throwable t) { Logger.log("GB applyIconAlpha FAIL: " + t); }
+        } catch (Throwable t) { ModuleLog.e("GB", "applyIconAlpha fail", t); }
     }
 
     static void rebuildSnapshots(View container) {
         try {
 
             final View base = container;
-            int[] ids = { ID_HOUR, ID_COLON, ID_MINUTES, ID_DATE, ID_WEATHER };
+            int[] ids = { ID_HOUR, ID_COLON, ID_MINUTES, ID_DATE, ID_WEATHER, ID_WEEK, ID_WEATHER2, ID_LUNAR };
             java.util.ArrayList<GlyphSnapshot> list = new java.util.ArrayList<GlyphSnapshot>();
             for (int id : ids) {
 
                 View v = container.findViewById(id);
                 if (!(v instanceof TextView)) {
-                    View root = findWidgetProviderRoot(container);
+                    View root = ViewUtils.descendantJustBelow(container, "AppWidgetHostView");
                     if (root != null) v = root.findViewById(id);
                 }
                 if (!(v instanceof TextView)) continue;
@@ -237,12 +339,8 @@ public class GlyphBlurRenderer {
                     startX = (tv.getWidth() - w) * 0.5f;
                 }
 
-                int[] locV = new int[2];
-                int[] locB = new int[2];
-                v.getLocationInWindow(locV);
-                base.getLocationInWindow(locB);
-                float dx = locV[0] - locB[0];
-                float dy = locV[1] - locB[1];
+                float dx = localOffsetX(v, base);
+                float dy = localOffsetY(v, base);
                 Path localPath = new Path();
                 tp.getTextPath(text, 0, text.length(), startX, baseline, localPath);
                 list.add(new GlyphSnapshot(localPath, dx, dy));
@@ -252,7 +350,7 @@ public class GlyphBlurRenderer {
             sSnapsMap.put(container, list.isEmpty() ? null : list.toArray(new GlyphSnapshot[0]));
             applyIconAlpha(container);
         } catch (Throwable t) {
-            Logger.log("GB rebuildSnapshots FAIL: " + t);
+            ModuleLog.e("GB", "rebuildSnapshots fail", t);
         }
     }
 
@@ -275,91 +373,166 @@ public class GlyphBlurRenderer {
     private static final android.os.Handler sHandler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     private static void installRefreshPoller(final View container, final Object blurDrawable) {
-        synchronized (sPolling) {
-            if (Boolean.TRUE.equals(sPolling.get(container))) { Logger.log("GB poller already"); return; }
+        PollRunner pr;
+        synchronized (sRunners) {
+            if (sRunners.containsKey(container)) { return; }
+            pr = new PollRunner(container, blurDrawable);
+            sRunners.put(container, pr);
             sPolling.put(container, Boolean.TRUE);
         }
-        final Runnable r = new Runnable() {
-            @Override public void run() {
-                try {
-                    StringBuilder sb = new StringBuilder();
-                    int[] ids = { ID_HOUR, ID_COLON, ID_MINUTES, ID_DATE, ID_WEATHER };
-                    for (int id : ids) {
-                        View v = container.findViewById(id);
-                        if (!(v instanceof TextView)) {
-                            View root = findWidgetProviderRoot(container);
-                            if (root != null) v = root.findViewById(id);
-                        }
-                        if (!(v instanceof TextView)) { sb.append("-"); sb.append("|"); continue; }
-                        CharSequence cs = ((TextView) v).getText();
-                        sb.append(cs == null ? "" : cs.toString());
+        pr.schedule(0L);
+        ModuleLog.d("GB", "poller installed");
+    }
 
-                        int[] loc = new int[2];
-                        v.getLocationInWindow(loc);
-                        sb.append("@").append(loc[0]).append(",").append(loc[1]);
-                        sb.append("|");
-                    }
-                    String cur = sb.toString();
-                    String prev = sPollState.get(container);
-                    if (prev == null || !prev.equals(cur)) {
-                        sPollState.put(container, cur);
-                        rebuildSnapshots(container);
-                        Method inv = findMethod(blurDrawable.getClass(), "invalidatePath", 0);
-                        if (inv != null) { inv.setAccessible(true); inv.invoke(blurDrawable); }
-                        container.invalidate();
-                    }
-                } catch (Throwable t) { Logger.log("GB poll fail: " + t); }
-                sHandler.postDelayed(this, 500L);
+    private static final class PollRunner implements Runnable {
+        private final View container;
+        private final Object blurDrawable;
+        private long intervalMs = POLL_INTERVAL_TICK_MS;
+        private int stableCount = 0;
+        private volatile boolean stopped = false;
+        private volatile boolean visible = true;
+        private String lastLogState = null;
+        private boolean ranOnce = false;
+        private boolean changedLogged = false;
+
+        PollRunner(View container, Object blurDrawable) {
+            this.container = container;
+            this.blurDrawable = blurDrawable;
+        }
+
+        void schedule(long delayMs) {
+            if (stopped) return;
+            sHandler.postDelayed(this, Math.max(0L, delayMs));
+        }
+
+        void onScreenStateChanged() {
+            if (sScreenOn) {
+                stopped = false;
+                stableCount = 0;
+                intervalMs = POLL_INTERVAL_TICK_MS;
+                logOnce("SCREEN_ON");
+                sHandler.removeCallbacks(this);
+                schedule(0L);
+            } else {
+                logOnce("SCREEN_OFF");
+                stopped = true;
+                sHandler.removeCallbacks(this);
             }
-        };
-        sHandler.postDelayed(r, 500L);
-        Logger.log("GB poller installed");
-    }
-
-    private static View findWidgetProviderRoot(View container) {
-        View cur = container;
-        View prev = container;
-        int g = 0;
-        while (cur != null && g++ < 50) {
-            if (cur.getClass().getName().contains("AppWidgetHostView")) return prev;
-            prev = cur;
-            cur = (cur.getParent() instanceof View) ? (View) cur.getParent() : null;
         }
-        return prev;
-    }
 
-    private static View findHost(View v) {
-        View cur = v;
-        int g = 0;
-        while (cur != null && g++ < 50) {
-            if (cur.getClass().getName().contains("AppWidgetHostView")) return cur;
-            cur = (cur.getParent() instanceof View) ? (View) cur.getParent() : null;
+        void kick() {
+            stopped = false;
+            stableCount = 0;
+            intervalMs = POLL_INTERVAL_TICK_MS;
+            sHandler.removeCallbacks(this);
+            ModuleLog.d("GB", "poll -> KICK (evt-driven)");
+            schedule(0L);
         }
-        return null;
-    }
 
-    private static Object invokeNoArg(Object o, String name) {
-        if (o == null) return null;
-        try {
-            Method m = findMethod(o.getClass(), name, 0);
-            if (m == null) return null;
-            m.setAccessible(true);
-            return m.invoke(o);
-        } catch (Throwable t) { return null; }
-    }
+        private void logOnce(String st) {
+            if ("STABLE".equals(st)) {
+                ModuleLog.d("GB", "poll -> STABLE (interval=" + intervalMs + ")");
+                return;
+            }
+            if (st.equals(lastLogState)) return;
+            lastLogState = st;
+            ModuleLog.d("GB", "poll -> " + st + " (interval=" + intervalMs + ")");
+        }
 
-    private static Method findMethod(Class<?> c, String name, int params) {
-        Class<?> k = c;
-        int g = 0;
-        while (k != null && g++ < 12) {
-            for (Method m : k.getDeclaredMethods()) {
-                if (m.getName().equals(name) && m.getParameterTypes().length == params) {
-                    m.setAccessible(true);
-                    return m;
+        private boolean isClockContainer() {
+            try {
+                View v = container.findViewById(ID_HOUR);
+                if (v instanceof TextView) return true;
+                View root = ViewUtils.descendantJustBelow(container, "AppWidgetHostView");
+                if (root != null) {
+                    View v2 = root.findViewById(ID_HOUR);
+                    if (v2 instanceof TextView) return true;
                 }
-            }
-            k = k.getSuperclass();
+            } catch (Throwable ignored) {}
+            return false;
         }
-        return null;
+        @Override public void run() {
+            if (stopped) return;
+            try {
+                if (!ranOnce) {
+                    ranOnce = true;
+                    ModuleLog.d("GB", "poll -> START (interval=" + intervalMs + ")");
+                }
+                if (!sScreenOn) {
+                    logOnce("SCREEN_OFF");
+                    stopped = true;
+                    return;
+                }
+                if (!ViewUtils.isReallyVisible(container)) {
+                    visible = false;
+                    stableCount++;
+                    if (stableCount >= POLL_STABLE_THRESHOLD) {
+                        if (intervalMs != POLL_INTERVAL_HIDDEN_MS) {
+                            intervalMs = POLL_INTERVAL_HIDDEN_MS;
+                            logOnce("HIDDEN");
+                        }
+                    } else {
+                        intervalMs = POLL_INTERVAL_TICK_MS;
+                    }
+                    sHandler.postDelayed(this, intervalMs);
+                    return;
+                }
+                if (!visible) {
+                    visible = true;
+                    stableCount = 0;
+                    intervalMs = POLL_INTERVAL_TICK_MS;
+                    logOnce("VISIBLE");
+                }
+                boolean changed = pollOnce();
+                if (changed) {
+                    if (!changedLogged) {
+                        changedLogged = true;
+                        ModuleLog.d("GB", "poll -> CHANGED (first change detected)");
+                    }
+                    stableCount = 0;
+                    intervalMs = POLL_INTERVAL_TICK_MS;
+                } else {
+                    stableCount++;
+                    if (stableCount >= POLL_STABLE_THRESHOLD && intervalMs < POLL_INTERVAL_MAX_MS) {
+                        intervalMs = Math.min(POLL_INTERVAL_MAX_MS, intervalMs + POLL_INTERVAL_TICK_MS);
+                        stableCount = 0;
+                        logOnce("STABLE");
+                    }
+                }
+            } catch (Throwable t) {
+                ModuleLog.e("GB", "poll fail", t);
+            }
+            if (!stopped) sHandler.postDelayed(this, intervalMs);
+        }
+
+        private boolean pollOnce() {
+            StringBuilder sb = new StringBuilder();
+            int[] ids = { ID_HOUR, ID_COLON, ID_MINUTES, ID_DATE, ID_WEATHER, ID_WEEK, ID_WEATHER2, ID_LUNAR };
+            for (int id : ids) {
+                View v = container.findViewById(id);
+                if (!(v instanceof TextView)) {
+                    View root = ViewUtils.descendantJustBelow(container, "AppWidgetHostView");
+                    if (root != null) v = root.findViewById(id);
+                }
+                if (!(v instanceof TextView)) { sb.append("-"); sb.append("|"); continue; }
+                CharSequence cs = ((TextView) v).getText();
+                sb.append(cs == null ? "" : cs.toString());
+                sb.append("@").append((int) localOffsetX(v, container)).append(",").append((int) localOffsetY(v, container));
+                sb.append("|");
+            }
+            String cur = sb.toString();
+            String prev = sPollState.get(container);
+            if (prev == null || !prev.equals(cur)) {
+                sPollState.put(container, cur);
+                rebuildSnapshots(container);
+                Method inv = Reflect.method(blurDrawable.getClass(), "invalidatePath", 0);
+                if (inv != null) { try { inv.setAccessible(true); inv.invoke(blurDrawable); } catch (Throwable ignored) {} }
+                container.invalidate();
+                return true;
+            }
+            return false;
+        }
     }
+
+
 }

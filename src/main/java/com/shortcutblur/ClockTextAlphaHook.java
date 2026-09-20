@@ -15,6 +15,9 @@ public final class ClockTextAlphaHook {
     private static final int ID_MINUTES = 0x7f0a02d3;
     private static final int ID_DATE    = 0x7f0a02ca;
     private static final int ID_WEATHER = 0x7f0a02da;
+    private static final int ID_WEEK    = 0x7f0a02db;
+    private static final int ID_WEATHER2   = 0x7f0a02d6;
+    private static final int ID_LUNAR   = 0x7f0a02cb;
 
     private static final int TARGET_ALPHA = 0x4D;
 
@@ -25,9 +28,9 @@ public final class ClockTextAlphaHook {
             Class<?> rv = Class.forName("android.widget.RemoteViews", false, cl);
             Method m = rv.getDeclaredMethod("setTextColor", int.class, int.class);
             mod.hook(m).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(new HookColor());
-            Logger.log("CTCH hooked RemoteViews.setTextColor");
+            ModuleLog.d("CTCH", "hooked RemoteViews.setTextColor");
         } catch (Throwable t) {
-            Logger.log("CTCH hook fail: " + t);
+            ModuleLog.e("CTCH", "hook fail", t);
         }
     }
 
@@ -42,9 +45,10 @@ public final class ClockTextAlphaHook {
                     if (a0 instanceof Integer && a1 instanceof Integer) {
                         int id = (Integer) a0;
                         int color = (Integer) a1;
-                        if (id == ID_HOUR || id == ID_COLON || id == ID_MINUTES || id == ID_DATE || id == ID_WEATHER) {
+                        if (id == ID_HOUR || id == ID_COLON || id == ID_MINUTES || id == ID_DATE || id == ID_WEATHER || id == ID_WEEK || id == ID_WEATHER2 || id == ID_LUNAR) {
                             int newColor = (color & 0x00FFFFFF) | (TARGET_ALPHA << 24);
-                            Logger.log("CTCH setTextColor id=0x" + Integer.toHexString(id)
+                            try { GlyphBlurRenderer.notifyContentMaybeChangedAll(); } catch (Throwable ignored) {}
+                            ModuleLog.d("CTCH", "setTextColor id=0x" + Integer.toHexString(id)
                                 + " color=0x" + Integer.toHexString(color)
                                 + " -> 0x" + Integer.toHexString(newColor));
 
@@ -56,7 +60,7 @@ public final class ClockTextAlphaHook {
                     }
                 }
             } catch (Throwable t) {
-                Logger.log("CTCH intercept fail: " + t);
+                ModuleLog.e("CTCH", "intercept fail", t);
             }
             return chain.proceed();
         }

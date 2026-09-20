@@ -2,6 +2,9 @@ package com.shortcutblur;
 
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.BroadcastReceiver;
 import android.graphics.RenderEffect;
 import android.graphics.Shader;
 import android.view.View;
@@ -59,8 +62,10 @@ public class BlurEnhanceModule extends XposedModule {
     private static final long DEPTH_FALLBACK_DELAY = 500L;
 
     private volatile ClassLoader cl;
+    private static volatile boolean sScreenReceiverInstalled = false;
 
     private volatile boolean installed = false;
+    private final java.util.WeakHashMap<android.view.View, String> sLastClockText = new java.util.WeakHashMap<android.view.View, String>();
 
     private volatile boolean postEffectInstalled = false;
     private final Set<Method> peHooked = new HashSet<>();
@@ -74,10 +79,6 @@ public class BlurEnhanceModule extends XposedModule {
     private volatile RenderEffect blurEffect;
 
     private static final Map<String, Class<?>> CLASS_CACHE = new ConcurrentHashMap<>();
-    private static final Map<String, Method> METHOD_CACHE = new ConcurrentHashMap<>();
-    private static final Map<String, Field> FIELD_CACHE = new ConcurrentHashMap<>();
-    private static final Map<String, Constructor<?>> CTOR_CACHE = new ConcurrentHashMap<>();
-
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
     }
@@ -88,6 +89,7 @@ public class BlurEnhanceModule extends XposedModule {
             if (param == null) return;
             String pkg = param.getPackageName();
             ModuleLog.i("onPackageReady pkg=" + pkg);
+            installScreenReceiverViaApp(param);
             if (PKG_POSTEFFECT.equals(pkg)) {
                 ClassLoader peLoader = param.getClassLoader();
                 if (peLoader == null) return;
@@ -121,6 +123,7 @@ public class BlurEnhanceModule extends XposedModule {
                 return;
             }
 
+            hookTextViewSetText(loader);
             HookInstallResult r = installHooks(loader);
             if (r.critical > 0) {
                 installed = true;
@@ -130,6 +133,68 @@ public class BlurEnhanceModule extends XposedModule {
             }
         } catch (Throwable t) {
             ModuleLog.e("READY", "onPackageReady failed", t);
+        }
+    }
+
+    private void installScreenReceiverViaApp(XposedModuleInterface.PackageReadyParam param) {
+        if (sScreenReceiverInstalled) return;
+        synchronized (BlurEnhanceModule.class) {
+            if (sScreenReceiverInstalled) return;
+            try {
+                ClassLoader cl = param.getClassLoader();
+                if (cl == null) { ModuleLog.d("SCREEN", "loader null"); return; }
+                ModuleLog.d("SCREEN", "try hook Application.attach via loader=" + cl.getClass().getName());
+                Class<?> appCls = Class.forName("android.app.Application", false, cl);
+                for (final Method m : appCls.getDeclaredMethods()) {
+                    if (!m.getName().equals("attach")) continue;
+                    Class<?>[] ps = m.getParameterTypes();
+                    if (ps.length != 1 || !ps[0].getName().equals("android.content.Context")) continue;
+                    m.setAccessible(true);
+                    this.hook(m).intercept(chain -> {
+                        Object r = chain.proceed();
+                        try {
+                            Object self = chain.getThisObject();
+                            if (self instanceof Context) {
+                                if (!sScreenReceiverInstalled) {
+                                    registerScreenReceiver((Context) self);
+                                }
+                            }
+                        } catch (Throwable t) {
+                            ModuleLog.d("SCREEN", "attach hook err: " + t);
+                        }
+                        return r;
+                    });
+                    ModuleLog.d("SCREEN", "hooked Application.attach (waiting)");
+                    return;
+                }
+                ModuleLog.d("SCREEN", "Application.attach not found");
+            } catch (Throwable t) {
+                ModuleLog.d("SCREEN", "hook attach err: " + t);
+            }
+        }
+    }
+
+    private void registerScreenReceiver(Context ctx) {
+        synchronized (BlurEnhanceModule.class) {
+            if (sScreenReceiverInstalled) return;
+            try {
+                IntentFilter f = new IntentFilter();
+                f.addAction(Intent.ACTION_SCREEN_ON);
+                f.addAction(Intent.ACTION_SCREEN_OFF);
+                f.addAction(Intent.ACTION_USER_PRESENT);
+                ctx.registerReceiver(new BroadcastReceiver() {
+                    @Override public void onReceive(Context c, Intent i) {
+                        String a = i == null ? "?" : i.getAction();
+                        boolean on = !Intent.ACTION_SCREEN_OFF.equals(a);
+                        ModuleLog.d("SCREEN", "action=" + a + " screenOn=" + on);
+                        GlyphBlurRenderer.setScreenOn(on);
+                    }
+                }, f);
+                sScreenReceiverInstalled = true;
+                ModuleLog.d("READY", "screen receiver installed ctx=" + ctx.getClass().getName());
+            } catch (Throwable t) {
+                ModuleLog.d("SCREEN", "registerReceiver err: " + t);
+            }
         }
     }
 
@@ -792,55 +857,15 @@ private RenderEffect getBlurEffect() {
     }
 
     private static Method findMethodCached(Class<?> cls, String name, Class<?>... paramTypes) {
-        StringBuilder sb = new StringBuilder(cls.getName()).append('#').append(name).append('(');
-        for (Class<?> p : paramTypes) sb.append(p.getName()).append(',');
-        sb.append(')');
-        String key = sb.toString();
-        Method cached = METHOD_CACHE.get(key);
-        if (cached != null) return cached;
-        try {
-            Method m = cls.getMethod(name, paramTypes);
-            m.setAccessible(true);
-            METHOD_CACHE.put(key, m);
-            return m;
-        } catch (Throwable t) {
-            return null;
-        }
+        return Reflect.method(cls, name, paramTypes);
     }
 
     private static Field findField(Class<?> cls, String name) {
-        String key = cls.getName() + "#" + name;
-        Field cached = FIELD_CACHE.get(key);
-        if (cached != null) return cached;
-        Class<?> c = cls;
-        while (c != null && c != Object.class) {
-            try {
-                Field f = c.getDeclaredField(name);
-                f.setAccessible(true);
-                FIELD_CACHE.put(key, f);
-                return f;
-            } catch (NoSuchFieldException nsf) {
-                c = c.getSuperclass();
-            } catch (Throwable t) {
-                return null;
-            }
-        }
-        return null;
+        return Reflect.field(cls, name);
     }
 
     private static Object newInstanceCached(Class<?> cls) {
-        String key = cls.getName();
-        Constructor<?> cached = CTOR_CACHE.get(key);
-        try {
-            if (cached == null) {
-                cached = cls.getDeclaredConstructor();
-                cached.setAccessible(true);
-                CTOR_CACHE.put(key, cached);
-            }
-            return cached.newInstance();
-        } catch (Throwable t) {
-            return null;
-        }
+        return Reflect.newInstance(cls);
     }
 
     private Object getStaticFloatProperty(Object dc, String name) {
@@ -886,23 +911,11 @@ private RenderEffect getBlurEffect() {
     }
 
     private Object invokeNoArgQuietly(Object target, String name) {
-        try {
-            Method m = findMethodCached(target.getClass(), name);
-            if (m == null) return null;
-            return m.invoke(target);
-        } catch (Throwable t) {
-            return null;
-        }
+        return Reflect.call(target, name);
     }
 
     private Object getFieldQuietlyAny(Object obj, String name) {
-        Field f = findField(obj.getClass(), name);
-        if (f == null) return null;
-        try {
-            return f.get(obj);
-        } catch (Throwable t) {
-            return null;
-        }
+        return Reflect.readField(obj, name);
     }
 
     private boolean installPostEffectHooks(ClassLoader loader) {
@@ -1001,7 +1014,7 @@ private RenderEffect getBlurEffect() {
 
     private boolean isInsideOpenFolder(View view) {
         try {
-            ViewGroup dragLayer = findDragLayer(view);
+            ViewGroup dragLayer = ViewUtils.ancestorGroupOfType(view, "DragLayer");
             if (dragLayer == null) {
                 ModuleLog.d("FOLDER", "no dragLayer found, chain=" + dumpViewChainNames(view));
                 return false;
@@ -1023,20 +1036,6 @@ private RenderEffect getBlurEffect() {
             ModuleLog.e("FOLDER", "isInsideOpenFolder failed", t);
             return false;
         }
-    }
-
-    private ViewGroup findDragLayer(View view) {
-        ViewParent p = view.getParent();
-        int guard = 0;
-        while (p != null && guard < 50) {
-            if (p instanceof ViewGroup) {
-                String cn = p.getClass().getName();
-                if (cn.contains("DragLayer")) return (ViewGroup) p;
-            }
-            p = (p instanceof View) ? ((View) p).getParent() : null;
-            guard++;
-        }
-        return null;
     }
 
     private String dumpViewChainNames(View view) {
@@ -1075,6 +1074,22 @@ private RenderEffect getBlurEffect() {
         } catch (Throwable t) {
             ModuleLog.e("MERGE", "RemoteViews.apply hook fail", t);
         }
+        try {
+            Method m2 = RemoteViews.class.getDeclaredMethod("reapply", android.content.Context.class, android.view.View.class);
+            hook(m2).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object r = chain.proceed();
+                    try {
+                        ModuleLog.d("MERGE", "[reapply] called");
+                        GlyphBlurRenderer.notifyContentMaybeChangedAll();
+                    } catch (Throwable ignored) {}
+                    return r;
+                }
+            });
+            ModuleLog.i("[merge] hooked RemoteViews.reapply");
+        } catch (Throwable t) {
+            ModuleLog.e("MERGE", "RemoteViews.reapply hook fail", t);
+        }
     }
 
     private void hookAppWidgetHostView(ClassLoader cl) {
@@ -1091,6 +1106,46 @@ private RenderEffect getBlurEffect() {
         }
     }
 
+    private void hookAllSetText(Class<?> tvClass) {
+        for (Method mm : tvClass.getDeclaredMethods()) {
+            if (!mm.getName().equals("setText")) continue;
+            try {
+                hook(mm).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object self = chain.getThisObject();
+                        Object r = chain.proceed();
+                        try {
+                            if (self instanceof android.widget.TextView) {
+                                android.widget.TextView t = (android.widget.TextView) self;
+                                int id = t.getId();
+                                if (id == 0x7f0a02cf || id == 0x7f0a02c8 || id == 0x7f0a02d3 || id == 0x7f0a02ca || id == 0x7f0a02da || id == 0x7f0a02db || id == 0x7f0a02d6 || id == 0x7f0a02cb) {
+                                    CharSequence cs = t.getText();
+                                    String now = cs == null ? "" : cs.toString();
+                                    String key = Integer.toHexString(id) + ":" + now;
+                                    String old = sLastClockText.get(t);
+                                    if (!key.equals(old)) {
+                                        sLastClockText.put(t, key);
+                                        GlyphBlurRenderer.notifyContentMaybeChangedAll();
+                                        ModuleLog.d("EVT", "clock setText id=0x" + Integer.toHexString(id) + " v=" + now);
+                                    }
+                                }
+                            }
+                        } catch (Throwable ignored) {}
+                        return r;
+                    }
+                });
+            } catch (Throwable ignored) {}
+        }
+        ModuleLog.i("[merge] hooked TextView.setText event-driven");
+    }
+    private void hookTextViewSetText(ClassLoader cl) {
+        try {
+            Class<?> tv = Class.forName("android.widget.TextView", false, cl);
+            hookAllSetText(tv);
+        } catch (Throwable t) {
+            ModuleLog.e("MERGE", "TextView.setText hook fail", t);
+        }
+    }
     private static final class RemoteViewsApplyHook implements XposedInterface.Hooker {
         private final ClassLoader cl;
         RemoteViewsApplyHook(ClassLoader c) { this.cl = c; }
@@ -1103,6 +1158,7 @@ private RenderEffect getBlurEffect() {
                 if (vg instanceof ViewGroup) {
                     WidgetBlurAttacher.attach("[apply]", (View) vg, cl);
                 }
+                try { GlyphBlurRenderer.notifyContentMaybeChangedAll(); } catch (Throwable ignored) {}
             } catch (Throwable t) {
                 ModuleLog.e("MERGE", "apply post fail", t);
             }
