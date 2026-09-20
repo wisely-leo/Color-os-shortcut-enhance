@@ -43,11 +43,9 @@ public class BlurEnhanceModule extends XposedModule {
 
     private static final String PKG_POSTEFFECT = "com.oplus.blur";
 
-    // [merge] blur test · ColorOS 桌面时钟组件字形模糊
     private static final String PKG_CLOCK = "com.coloros.alarmclock";
     private static final String CLS_EA = "e.a";
     private static final float SAMPLE_SCALE = 0.5f;
-
 
     private static final float BLUR_RADIUS = 64.0f;
     private static final long BLUR_DURATION = 330L;
@@ -102,12 +100,11 @@ public class BlurEnhanceModule extends XposedModule {
                 }
                 return;
             }
-            // [merge] blur test: 时钟应用进程 -> 字体透明
+
             if (PKG_CLOCK.equals(pkg)) {
                 ClockTextAlphaHook.install(this, param.getClassLoader());
             }
 
-            // [merge] blur test: 桌面进程 -> RemoteViews / AppWidgetHostView 钩子
             ClassLoader anyLoader = param.getClassLoader();
             if (anyLoader != null) {
                 hookRemoteViewsApply(anyLoader);
@@ -579,7 +576,6 @@ private RenderEffect getBlurEffect() {
         }
         return e;
     }
-
 
     private void clearIconBlurByFlags(View v, int flags, String tag) {
         if ((flags & F_ICON_ANIM) != 0) {
@@ -1070,7 +1066,6 @@ private RenderEffect getBlurEffect() {
     private ClassLoader currentClassLoader() {
         return cl;
     }
-    // ===================== [merge] blur test 并入部分 =====================
 
     private void hookRemoteViewsApply(ClassLoader cl) {
         try {

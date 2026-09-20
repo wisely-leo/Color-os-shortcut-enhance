@@ -9,8 +9,6 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 
-// v20e: snapshot cache. UI thread builds geometry snapshot;
-// render thread getPath only uses snapshot, never touches View.
 public class GlyphBlurRenderer {
 
     private static final int MAX_RETRY = 12;
@@ -22,10 +20,10 @@ public class GlyphBlurRenderer {
     private static final int ID_MINUTES = 0x7f0a02d3;
     private static final int ID_DATE    = 0x7f0a02ca;
     private static final int ID_WEATHER = 0x7f0a02da;
-    // v31: 天气图标（ImageView，RemoteViews.setImageViewBitmap 设置），setTextColor 管不到
-    private static final int ID_WEATHER_IMG1 = 0x7f0a02d9; // local_weather_info_refresh_img
-    private static final int ID_WEATHER_IMG2 = 0x7f0a0276; // iv_weather_type
-    // 与文字透明度一致：0x4D/0xFF ≈ 0.302
+
+    private static final int ID_WEATHER_IMG1 = 0x7f0a02d9;
+    private static final int ID_WEATHER_IMG2 = 0x7f0a0276;
+
     private static final float ICON_ALPHA = 0.30f;
 
     private static final class GlyphSnapshot {
@@ -36,7 +34,6 @@ public class GlyphBlurRenderer {
         }
     }
 
-    // v22: 每个 container 一份快照（多个时钟组件不能共用）
     private static final java.util.WeakHashMap<View, GlyphSnapshot[]> sSnapsMap = new java.util.WeakHashMap<View, GlyphSnapshot[]>();
 
     public static void attachGlyphBlur(final View container, final ClassLoader cl) {
@@ -97,17 +94,15 @@ public class GlyphBlurRenderer {
         }, RETRY_DELAY_MS);
     }
 
-    // v32: updateAppWidget 后立即刷新（不等 poller 的 500ms）。
-    // 推迟到下一帧 post 执行，确保 layout 已完成（否则读到旧的绝对坐标 → 偏移）。
     static void onWidgetUpdated(final View container) {
         if (container == null) return;
-        // ① 同步先刷一次（拿当前值，尽量减小闪动幅度）
+
         rebuildSnapshotsNow(container);
-        // ② postOnAnimation：下一帧最早时机，layout 后立即修正
+
         container.postOnAnimation(new Runnable() {
             @Override public void run() { rebuildSnapshotsNow(container); }
         });
-        // ③ 再补一帧（layout 彻底稳定后）
+
         container.postDelayed(new Runnable() {
             @Override public void run() { rebuildSnapshotsNow(container); }
         }, 50L);
@@ -127,7 +122,6 @@ public class GlyphBlurRenderer {
         } catch (Throwable t) { Logger.log("GB rebuildSnapshotsNow FAIL: " + t); }
     }
 
-    // v34: 把天气图标的 alpha 轮廓转成字形 Path，加进快照。
     private static void appendWeatherIconSnapshots(View container, View base, java.util.ArrayList<GlyphSnapshot> list) {
         int[] iconIds = { ID_WEATHER_IMG1, ID_WEATHER_IMG2 };
         for (int id : iconIds) {
@@ -147,7 +141,7 @@ public class GlyphBlurRenderer {
                 }
                 if (bmp == null || bmp.isRecycled()) continue;
                 if (bmp.getWidth() <= 0 || bmp.getHeight() <= 0) continue;
-                // 缩到一定尺寸，减少 Region 矩形数
+
                 int bw = Math.min(bmp.getWidth(), 96);
                 int bh = Math.max(1, bmp.getHeight() * bw / bmp.getWidth());
                 android.graphics.Bitmap small = android.graphics.Bitmap.createScaledBitmap(bmp, bw, bh, true);
@@ -172,7 +166,7 @@ public class GlyphBlurRenderer {
                 android.graphics.RegionIterator it = new android.graphics.RegionIterator(region);
                 android.graphics.Rect r = new android.graphics.Rect();
                 while (it.next(r)) iconPath.addRect(r.left, r.top, r.right, r.bottom, Path.Direction.CW);
-                // 映射回 ImageView 本地坐标（含文字/图标在 View 内的绘制区域）
+
                 float sx = (float) iv.getWidth() / bw;
                 float sy = (float) iv.getHeight() / bh;
                 android.graphics.Matrix m = new android.graphics.Matrix();
@@ -189,8 +183,6 @@ public class GlyphBlurRenderer {
         }
     }
 
-    // v31: 天气图标透明化。图标用 setImageViewBitmap 设置，
-    // setTextColor 无法触及，且每次 updateAppWidget 会重置，故每次刷新都设。
     static void applyIconAlpha(View container) {
         try {
             int[] iconIds = { ID_WEATHER_IMG1, ID_WEATHER_IMG2 };
@@ -211,13 +203,12 @@ public class GlyphBlurRenderer {
 
     static void rebuildSnapshots(View container) {
         try {
-            // v25: 回退到 container 基准（host 基准会往右下偏）
+
             final View base = container;
             int[] ids = { ID_HOUR, ID_COLON, ID_MINUTES, ID_DATE, ID_WEATHER };
             java.util.ArrayList<GlyphSnapshot> list = new java.util.ArrayList<GlyphSnapshot>();
             for (int id : ids) {
-                // v28: 日期/天气可能不在 container 子树内（与时间行容器平级），
-                // 先在 container 内找，找不到再从整棵树找
+
                 View v = container.findViewById(id);
                 if (!(v instanceof TextView)) {
                     View root = findWidgetProviderRoot(container);
@@ -230,15 +221,14 @@ public class GlyphBlurRenderer {
                 String text = cs.toString();
                 TextPaint tp = tv.getPaint();
                 if (tp == null) continue;
-                // v29: 完全用 Layout 真实行几何（渲染器用的值），
-                // 与 gravity / padding / 字号无关，日期/天气/数字通吃。
+
                 float baseline;
                 float startX;
                 android.text.Layout lay = tv.getLayout();
                 if (lay != null && lay.getLineCount() > 0) {
                     int line = 0;
                     baseline = tv.getTotalPaddingTop() + lay.getLineBaseline(line) + GLYPH_DY;
-                    // getLineLeft 已包含居中止/左对齐（居中时为负，正好抵消）
+
                     startX = tv.getTotalPaddingLeft() + lay.getLineLeft(line);
                 } else {
                     android.graphics.Paint.FontMetrics fm = tp.getFontMetrics();
@@ -246,8 +236,7 @@ public class GlyphBlurRenderer {
                     float w = tp.measureText(text);
                     startX = (tv.getWidth() - w) * 0.5f;
                 }
-                // v28: 用绝对坐标差算相对 container 的偏移（与层级无关，
-                // 支持日期/天气等不在 container 内部的 View）
+
                 int[] locV = new int[2];
                 int[] locB = new int[2];
                 v.getLocationInWindow(locV);
@@ -258,10 +247,10 @@ public class GlyphBlurRenderer {
                 tp.getTextPath(text, 0, text.length(), startX, baseline, localPath);
                 list.add(new GlyphSnapshot(localPath, dx, dy));
             }
-            // v34: 天气图标也加模糊（Bitmap alpha 轮廓 -> Path）
+
             appendWeatherIconSnapshots(container, base, list);
             sSnapsMap.put(container, list.isEmpty() ? null : list.toArray(new GlyphSnapshot[0]));
-            applyIconAlpha(container);  // v31: 天气图标透明（每次刷新都设，防止被 updateAppWidget 重置）
+            applyIconAlpha(container);
         } catch (Throwable t) {
             Logger.log("GB rebuildSnapshots FAIL: " + t);
         }
@@ -281,7 +270,6 @@ public class GlyphBlurRenderer {
         return out;
     }
 
-    // v27: 轮询。所有状态 per-container（多组件互不干扰）。
     private static final java.util.WeakHashMap<View, Boolean> sPolling = new java.util.WeakHashMap<View, Boolean>();
     private static final java.util.WeakHashMap<View, String> sPollState = new java.util.WeakHashMap<View, String>();
     private static final android.os.Handler sHandler = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -305,8 +293,7 @@ public class GlyphBlurRenderer {
                         if (!(v instanceof TextView)) { sb.append("-"); sb.append("|"); continue; }
                         CharSequence cs = ((TextView) v).getText();
                         sb.append(cs == null ? "" : cs.toString());
-                        // v32: 指纹用 getLocationInWindow（与 rebuildSnapshots 同一坐标系），
-                        // 否则 updateAppWidget 后绝对位置变了但 getLeft/Top 未变 → 检测不到 → 偏移
+
                         int[] loc = new int[2];
                         v.getLocationInWindow(loc);
                         sb.append("@").append(loc[0]).append(",").append(loc[1]);
@@ -329,10 +316,6 @@ public class GlyphBlurRenderer {
         Logger.log("GB poller installed");
     }
 
-    // v28: 找 widget provider 根（同一组件内的最外层容器）。
-    // 日期/天气与时间行容器是兄弟，都在 provider 根下；
-    // 用 provider 根 findViewById 才能保证是“同一组件内”，不会串到另一个时钟组件。
-    // 判据：往上找，直到父级是 AppWidgetHostView（host）为止，取 host 的下一层。
     private static View findWidgetProviderRoot(View container) {
         View cur = container;
         View prev = container;

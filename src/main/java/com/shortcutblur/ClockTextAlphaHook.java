@@ -8,22 +8,15 @@ import io.github.libxposed.api.XposedInterface.Chain;
 import io.github.libxposed.api.XposedInterface.ExceptionMode;
 import io.github.libxposed.api.XposedModule;
 
-/**
- * P1: 把时钟字体变半透明，验证能否透出下层。
- * 策略：Hook RemoteViews.setTextColor(int,int)（本应用内），
- *       对时钟 3 个 id（小时/冒号/分钟）强制 alpha。
- */
 public final class ClockTextAlphaHook {
 
-    // 与 View dump / aapt2 资源表 100%% 吻合
-    private static final int ID_HOUR    = 0x7f0a02cf; // local_hour_txt
-    private static final int ID_COLON   = 0x7f0a02c8; // local_colon_txt
-    private static final int ID_MINUTES = 0x7f0a02d3; // local_minutes_txt
-    private static final int ID_DATE    = 0x7f0a02ca; // local_date_info_txt
-    private static final int ID_WEATHER = 0x7f0a02da; // local_weather_info_txt
+    private static final int ID_HOUR    = 0x7f0a02cf;
+    private static final int ID_COLON   = 0x7f0a02c8;
+    private static final int ID_MINUTES = 0x7f0a02d3;
+    private static final int ID_DATE    = 0x7f0a02ca;
+    private static final int ID_WEATHER = 0x7f0a02da;
 
-    // 目标 alpha（0x00=全透，0x80=半透，0xFF=不透）
-    private static final int TARGET_ALPHA = 0x4D; // v28: 50% -> 70% 透明
+    private static final int TARGET_ALPHA = 0x4D;
 
     private ClockTextAlphaHook() {}
 
@@ -54,7 +47,7 @@ public final class ClockTextAlphaHook {
                             Logger.log("CTCH setTextColor id=0x" + Integer.toHexString(id)
                                 + " color=0x" + Integer.toHexString(color)
                                 + " -> 0x" + Integer.toHexString(newColor));
-                            // 用新参数数组继续（getArgs() 不可变，必须走 proceed(Object[])）
+
                             Object[] newArgs = new Object[args.size()];
                             for (int i = 0; i < args.size(); i++) newArgs[i] = args.get(i);
                             newArgs[1] = Integer.valueOf(newColor);
