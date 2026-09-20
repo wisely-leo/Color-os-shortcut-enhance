@@ -6,16 +6,8 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * 反射工具：统一查找 / 调用入口，内置缓存。
- *
- * 背景：findMethod/findField/invoke 原本在 BlurEnhanceModule、GlyphBlurRenderer、
- * WidgetBlurAttacher 各自实现一份，且后两者无缓存，在 rebuild 热路径上每次都会
- * 全遍历 getDeclaredMethods()。此处统一为带缓存的单一实现。
- */
 public final class Reflect {
 
-    /** 沿继承链查找的上限，防空指针死循环。 */
     private static final int MAX_DEPTH = 16;
 
     private static final Map<String, Method> METHOD_CACHE = new ConcurrentHashMap<>();
@@ -24,9 +16,6 @@ public final class Reflect {
 
     private Reflect() {}
 
-    // ---------------- 方法 ----------------
-
-    /** 按参数个数查找（不限定可见性，沿继承链），带缓存。 */
     public static Method method(Class<?> c, String name, int paramCount) {
         if (c == null || name == null) return null;
         String key = c.getName() + "#n:" + name + "/" + paramCount;
@@ -49,7 +38,6 @@ public final class Reflect {
         return null;
     }
 
-    /** 按参数类型查找（仅 public，沿继承链），带缓存。 */
     public static Method method(Class<?> c, String name, Class<?>... paramTypes) {
         if (c == null || name == null) return null;
         StringBuilder sb = new StringBuilder(c.getName()).append('#').append(name).append('(');
@@ -69,9 +57,6 @@ public final class Reflect {
         }
     }
 
-    // ---------------- 字段 ----------------
-
-    /** 沿继承链查找字段（含私有），带缓存。 */
     public static Field field(Class<?> c, String name) {
         if (c == null || name == null) return null;
         String key = c.getName() + "#" + name;
@@ -93,9 +78,6 @@ public final class Reflect {
         return null;
     }
 
-    // ---------------- 构造 ----------------
-
-    /** 缓存无参构造器并创建实例。 */
     public static Object newInstance(Class<?> c) {
         if (c == null) return null;
         String key = c.getName();
@@ -112,9 +94,6 @@ public final class Reflect {
         }
     }
 
-    // ---------------- 调用 ----------------
-
-    /** 调用无参方法（静默），失败返回 null。 */
     public static Object call(Object target, String name) {
         if (target == null) return null;
         Method m = method(target.getClass(), name, 0);
@@ -126,7 +105,6 @@ public final class Reflect {
         }
     }
 
-    /** 按参数个数调用（静默），失败返回 null。 */
     public static Object call(Object target, String name, int paramCount, Object... args) {
         if (target == null) return null;
         Method m = method(target.getClass(), name, paramCount);
@@ -138,7 +116,6 @@ public final class Reflect {
         }
     }
 
-    /** 按参数类型调用（静默），失败返回 null。 */
     public static Object callStatic(Class<?> c, String name, Class<?>[] types, Object... args) {
         Method m = method(c, name, types);
         if (m == null) return null;
@@ -149,9 +126,6 @@ public final class Reflect {
         }
     }
 
-    // ---------------- 字段读写 ----------------
-
-    /** 读字段（先 static 再 instance，静默），失败返回 null。 */
     public static Object readField(Object target, String name) {
         if (target == null) return null;
         Field f = field(target.getClass(), name);

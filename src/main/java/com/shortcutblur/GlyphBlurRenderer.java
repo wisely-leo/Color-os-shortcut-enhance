@@ -21,7 +21,6 @@ public class GlyphBlurRenderer {
     private static final long POLL_INTERVAL_TICK_MS = 500L;
     private static final int  POLL_STABLE_THRESHOLD = 6;
 
-
     private static final int ID_HOUR    = 0x7f0a02cf;
     private static final int ID_COLON   = 0x7f0a02c8;
     private static final int ID_MINUTES = 0x7f0a02d3;
@@ -47,13 +46,10 @@ public class GlyphBlurRenderer {
     private static final java.util.WeakHashMap<View, GlyphSnapshot[]> sSnapsMap = new java.util.WeakHashMap<View, GlyphSnapshot[]>();
     private static volatile boolean sScreenOn = true;
     private static final java.util.WeakHashMap<View, PollRunner> sRunners = new java.util.WeakHashMap<View, PollRunner>();
-    // icon path cache (keyed by ImageView)
-    // ---- icon path cache (fingerprint keyed: View/Bitmap instances are recreated on every
-    // RemoteViews.reapply, so identity keys never hit. A cheap pixel fingerprint is stable.) ----
+
     private static final java.util.HashMap<Integer, Integer> sIconFp = new java.util.HashMap<Integer, Integer>();
     private static final java.util.HashMap<Integer, Path> sIconFpPath = new java.util.HashMap<Integer, Path>();
 
-    /** Cheap 16-point pixel fingerprint. ~2-8us vs ~111-272us for the full 9216px raster. */
     private static int iconFingerprint(android.graphics.Bitmap b) {
         if (b == null || b.isRecycled()) return 0;
         int w = b.getWidth(), h = b.getHeight();
@@ -205,8 +201,6 @@ public class GlyphBlurRenderer {
                 if (bmp == null || bmp.isRecycled()) continue;
                 if (bmp.getWidth() <= 0 || bmp.getHeight() <= 0) continue;
 
-                // ---- icon path cache: bitmap raster is the most expensive part of a rebuild,
-                // but the weather icon only changes a few times a day. Reuse the traced Path.
                 int fp = iconFingerprint(bmp);
                 Integer cFp = sIconFp.get(id);
                 if (cFp != null && cFp.intValue() == fp) {
@@ -256,13 +250,6 @@ public class GlyphBlurRenderer {
         }
     }
 
-    /**
-     * Pure-layout offset of `v` relative to `container` (no window coords, no render
-     * transforms). Accumulates getLeft()/getTop() up the parent chain and subtracts
-     * scroll offsets. This makes glyph paths live in container-local coordinates, so
-     * the system automatically applies any ancestor scale/translation (transition
-     * animations) when rendering -> blur follows the widget without drifting.
-     */
     static float localOffsetX(View v, View container) {
         return localOffset(v, container, true);
     }
@@ -533,6 +520,5 @@ public class GlyphBlurRenderer {
             return false;
         }
     }
-
 
 }

@@ -11,17 +11,16 @@ public class WidgetBlurAttacher {
     private static final int CONTAINER_ID = 0x7f0a02ab;
 
     private static final java.util.WeakHashMap<View, Boolean> sDone = new java.util.WeakHashMap<View, Boolean>();
-    /** host -> the container we already bound to it; lets us skip repeat work when nothing changed. */
+
     private static final java.util.WeakHashMap<View, View> sDoneHost = new java.util.WeakHashMap<View, View>();
 
     private static final long ATTACH_RETRY_MS = 120L;
     private static final int ATTACH_MAX_RETRY = 8;
-    /** Roots that failed all retries AND never contained the clock container: stop re-trying. */
+
     private static final java.util.WeakHashMap<View, Boolean> sGaveUp = new java.util.WeakHashMap<View, Boolean>();
-    /** True once a root ever showed hasT=true, so we can re-arm a previously given-up root. */
+
     private static final java.util.WeakHashMap<View, Boolean> sEverHit = new java.util.WeakHashMap<View, Boolean>();
 
-    /** Entry: try once, then retry (for Launcher reload where widget children inflate late). */
     public static void attach(final String tag, final View root, final ClassLoader cl) {
         attach(tag, root, cl, 0);
     }

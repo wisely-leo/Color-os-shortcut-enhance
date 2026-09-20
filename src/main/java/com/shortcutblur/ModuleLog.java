@@ -10,16 +10,6 @@ import java.io.Writer;
 
 public final class ModuleLog {
 
-    /**
-     * 日志总开关（编译期常量，默认关闭）。
-     *
-     * false = 发布默认。编译器内联把 d()/e()/i() 调用点折叠为 return，
-     *          dex 中不保留任何日志逻辑，零开销、零日志。
-     * true  = 仅用于本地排障，需手动改这一行并重新编译，门槛故意提高，
-     *         禁止合入发布构建。
-     *
-     * 注意：static final 基本类型常量无法在运行时修改，开关只在编译期生效。
-     */
     public static final boolean ENABLED = false;
 
     public static final String TAG = "colorosblurenhance";
