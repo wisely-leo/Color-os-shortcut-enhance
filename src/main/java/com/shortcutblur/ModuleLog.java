@@ -8,17 +8,17 @@ import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 
-public final class SBLog {
+public final class ModuleLog {
 
     public static final boolean ENABLED = false;
 
-    public static final String TAG = "shortcutblur";
+    public static final String TAG = "colorosblurenhance";
 
     private static final long T0 = SystemClock.uptimeMillis();
 
     private static final String DIR = "/storage/emulated/0/Download";
 
-    private static final String FILE = "ShortcutBlur.log";
+    private static final String FILE = "ColorOSBlurEnhance.log";
 
     private static final String FILE_BLUR = "PostEffectBlur.log";
 
@@ -28,7 +28,7 @@ public final class SBLog {
 
     private static boolean broken;
 
-    private SBLog() {}
+    private ModuleLog() {}
 
     public static void d(String category, String detail) {
         if (!ENABLED) return;

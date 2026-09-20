@@ -8,6 +8,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.animation.DecelerateInterpolator;
+import android.widget.RemoteViews;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
@@ -23,7 +24,7 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
-public class ShortcutBlurModule extends XposedModule {
+public class BlurEnhanceModule extends XposedModule {
 
     private static final String CLS_POPUP_BLUR_VIEW = "com.android.launcher3.popup.PopupBlurView";
     private static final String CLS_OPLUS_POPUP = "com.android.launcher3.popup.OplusPopupContainerWithArrow";
@@ -41,6 +42,9 @@ public class ShortcutBlurModule extends XposedModule {
     private static final String M_GET_POP_BLUR_VIEW = "getPopBlurView";
 
     private static final String PKG_POSTEFFECT = "com.oplus.blur";
+
+    // [merge] blur test · ColorOS 桌面时钟组件字形模糊
+    private static final String PKG_CLOCK = "com.coloros.alarmclock";
     private static final String CLS_EA = "e.a";
     private static final float SAMPLE_SCALE = 0.5f;
 
@@ -85,12 +89,12 @@ public class ShortcutBlurModule extends XposedModule {
         try {
             if (param == null) return;
             String pkg = param.getPackageName();
-            SBLog.i("onPackageReady pkg=" + pkg);
+            ModuleLog.i("onPackageReady pkg=" + pkg);
             if (PKG_POSTEFFECT.equals(pkg)) {
                 ClassLoader peLoader = param.getClassLoader();
                 if (peLoader == null) return;
                 if (postEffectInstalled) {
-                    SBLog.d("READY", "posteffect already installed, skip");
+                    ModuleLog.d("READY", "posteffect already installed, skip");
                     return;
                 }
                 if (installPostEffectHooks(peLoader)) {
@@ -98,25 +102,37 @@ public class ShortcutBlurModule extends XposedModule {
                 }
                 return;
             }
+            // [merge] blur test: 时钟应用进程 -> 字体透明
+            if (PKG_CLOCK.equals(pkg)) {
+                ClockTextAlphaHook.install(this, param.getClassLoader());
+            }
+
+            // [merge] blur test: 桌面进程 -> RemoteViews / AppWidgetHostView 钩子
+            ClassLoader anyLoader = param.getClassLoader();
+            if (anyLoader != null) {
+                hookRemoteViewsApply(anyLoader);
+                hookAppWidgetHostView(anyLoader);
+            }
+
             if (!isTargetLauncher(pkg)) return;
             ClassLoader loader = param.getClassLoader();
             if (loader == null) return;
             this.cl = loader;
 
             if (installed) {
-                SBLog.d("READY", "already installed, skip");
+                ModuleLog.d("READY", "already installed, skip");
                 return;
             }
 
-            InstallResult r = installHooks(loader);
+            HookInstallResult r = installHooks(loader);
             if (r.critical > 0) {
                 installed = true;
-                SBLog.d("READY", "installed critical=" + r.critical + " total=" + r.total);
+                ModuleLog.d("READY", "installed critical=" + r.critical + " total=" + r.total);
             } else {
-                SBLog.d("READY", "no critical hook, will retry (total=" + r.total + ")");
+                ModuleLog.d("READY", "no critical hook, will retry (total=" + r.total + ")");
             }
         } catch (Throwable t) {
-            SBLog.e("READY", "onPackageReady failed", t);
+            ModuleLog.e("READY", "onPackageReady failed", t);
         }
     }
 
@@ -126,41 +142,41 @@ public class ShortcutBlurModule extends XposedModule {
                 || "com.coloros.launcher".equals(p);
     }
 
-    private static final class InstallResult {
+    private static final class HookInstallResult {
         int critical;
         int total;
     }
 
-    private InstallResult installHooks(ClassLoader loader) {
-        InstallResult r = new InstallResult();
+    private HookInstallResult installHooks(ClassLoader loader) {
+        HookInstallResult r = new HookInstallResult();
 
         Set<Method> hooked = new HashSet<>();
         try {
-            Class<?> cls = forName(CLS_POPUP_BLUR_VIEW, loader);
+            Class<?> cls = loadClass(CLS_POPUP_BLUR_VIEW, loader);
             if (cls != null) {
-                r.total += hookReturnView(cls, M_GET_POP_BLUR_VIEW, "pbv");
-                r.total += hookFinish(cls);
+                r.total += hookViewReturningMethod(cls, M_GET_POP_BLUR_VIEW, "pbv");
+                r.total += hookPopupFinish(cls);
             }
-            Class<?> comp = forName(CLS_POPUP_BLUR_VIEW + "$Companion", loader);
+            Class<?> comp = loadClass(CLS_POPUP_BLUR_VIEW + "$Companion", loader);
             if (comp != null) {
-                r.total += hookReturnView(comp, M_GET_POP_BLUR_VIEW, "pbv_companion");
+                r.total += hookViewReturningMethod(comp, M_GET_POP_BLUR_VIEW, "pbv_companion");
             }
 
             for (String cn : new String[]{CLS_OPLUS_POPUP, CLS_ARROW_POPUP, CLS_POPUP_BLUR_VIEW}) {
-                Class<?> ac = forName(cn, loader);
+                Class<?> ac = loadClass(cn, loader);
                 if (ac == null) continue;
-                r.critical += hookOpenCloseAnim(ac, "onCreateOpenAnimation", true, hooked);
-                r.critical += hookOpenCloseAnim(ac, "onCreateCloseAnimation", false, hooked);
+                r.critical += hookPopupOpenCloseAnimation(ac, "onCreateOpenAnimation", true, hooked);
+                r.critical += hookPopupOpenCloseAnimation(ac, "onCreateCloseAnimation", false, hooked);
             }
             r.total += r.critical;
-            SBLog.d("INSTALL", "critical=" + r.critical + " total=" + r.total);
+            ModuleLog.d("INSTALL", "critical=" + r.critical + " total=" + r.total);
         } catch (Throwable t) {
-            SBLog.e("INSTALL", "installHooks failed", t);
+            ModuleLog.e("INSTALL", "installHooks failed", t);
         }
         return r;
     }
 
-    private int hookFinish(Class<?> cls) {
+    private int hookPopupFinish(Class<?> cls) {
         int n = 0;
         try {
             for (Method m : cls.getDeclaredMethods()) {
@@ -180,16 +196,16 @@ public class ShortcutBlurModule extends XposedModule {
                                 try {
                                     if (self instanceof View) {
                                         View v = (View) self;
-                                        int flags = flagsFor(v);
-                                        SBLog.d("FINISH", "flags=" + flags);
-                                        invalidateFlags(v);
+                                        int flags = resolveBlurFlags(v);
+                                        ModuleLog.d("FINISH", "flags=" + flags);
+                                        clearBlurFlagsCache(v);
                                         if ((flags & F_WALL) != 0) {
                                             animateDepthBlur(v, 1.0f, 0.0f, BLUR_DURATION);
                                         }
                                         clearIconBlurByFlags(v, flags, "single-shot clear");
                                     }
                                 } catch (Throwable t) {
-                                    SBLog.e("FINISH", "hook body failed", t);
+                                    ModuleLog.e("FINISH", "hook body failed", t);
                                 }
                                 return chain.proceed();
                             }
@@ -197,12 +213,12 @@ public class ShortcutBlurModule extends XposedModule {
                 n++;
             }
         } catch (Throwable t) {
-            SBLog.e("INSTALL", "hookFinish failed", t);
+            ModuleLog.e("INSTALL", "hookPopupFinish failed", t);
         }
         return n;
     }
 
-    private int hookOpenCloseAnim(Class<?> cls, final String methodName, final boolean opening,
+    private int hookPopupOpenCloseAnimation(Class<?> cls, final String methodName, final boolean opening,
                                   Set<Method> hooked) {
         int n = 0;
         try {
@@ -214,7 +230,7 @@ public class ShortcutBlurModule extends XposedModule {
                     if (!"android.animation.AnimatorSet".equals(pt[0].getName())) continue;
 
                     if (!hooked.add(m)) {
-                        SBLog.d("INSTALL", "skip dup hook " + c.getName() + "." + methodName);
+                        ModuleLog.d("INSTALL", "skip dup hook " + c.getName() + "." + methodName);
                         continue;
                     }
                     setAccessibleQuietly(m);
@@ -235,23 +251,23 @@ public class ShortcutBlurModule extends XposedModule {
                                             if (anchor == null && self instanceof View) anchor = (View) self;
                                         }
                                         if (anchor != null && set != null) {
-                                            int flags = flagsFor(anchor);
-                                            SBLog.d("ANIM", methodName + " flags=" + flags);
+                                            int flags = resolveBlurFlags(anchor);
+                                            ModuleLog.d("ANIM", methodName + " flags=" + flags);
                                             if ((flags & F_WALL) != 0) {
                                                 float from = opening ? 0.0f : 1.0f;
                                                 float to = opening ? 1.0f : 0.0f;
-                                                Object anim = newDepthBlurAnim(anchor, from, to, BLUR_DURATION);
+                                                Object anim = createDepthBlurAnimation(anchor, from, to, BLUR_DURATION);
                                                 if (anim != null) {
-                                                    animatorSetPlay(set, anim);
+                                                    playIntoAnimatorSet(set, anim);
                                                 }
                                             }
                                             if (!opening) {
-                                                invalidateFlags(anchor);
+                                                clearBlurFlagsCache(anchor);
                                                 clearIconBlurByFlags(anchor, flags, "single-shot clear(anim)");
                                             }
                                         }
                                     } catch (Throwable t) {
-                                        SBLog.e("ANIM", "hook body failed (" + methodName + ")", t);
+                                        ModuleLog.e("ANIM", "hook body failed (" + methodName + ")", t);
                                     }
                                     return result;
                                 }
@@ -260,12 +276,12 @@ public class ShortcutBlurModule extends XposedModule {
                 }
             }
         } catch (Throwable t) {
-            SBLog.e("INSTALL", "hookOpenCloseAnim(" + methodName + ") failed", t);
+            ModuleLog.e("INSTALL", "hookPopupOpenCloseAnimation(" + methodName + ") failed", t);
         }
         return n;
     }
 
-    private int hookReturnView(Class<?> cls, String methodName, String id) {
+    private int hookViewReturningMethod(Class<?> cls, String methodName, String id) {
         int n = 0;
         try {
             for (Method m : cls.getDeclaredMethods()) {
@@ -281,10 +297,10 @@ public class ShortcutBlurModule extends XposedModule {
                                 Object result = chain.proceed();
                                 try {
                                     if (result instanceof View) {
-                                        makeBlurLive((View) result, mid);
+                                        armBlurForView((View) result, mid);
                                     }
                                 } catch (Throwable t) {
-                                    SBLog.e("LIVE", "hook body failed", t);
+                                    ModuleLog.e("LIVE", "hook body failed", t);
                                 }
                                 return result;
                             }
@@ -292,12 +308,12 @@ public class ShortcutBlurModule extends XposedModule {
                 n++;
             }
         } catch (Throwable t) {
-            SBLog.e("INSTALL", "hookReturnView(" + id + ") failed", t);
+            ModuleLog.e("INSTALL", "hookViewReturningMethod(" + id + ") failed", t);
         }
         return n;
     }
 
-    private int flagsFor(View view) {
+    private int resolveBlurFlags(View view) {
         if (view == null) return 0;
         synchronized (flagsCache) {
             Integer c = flagsCache.get(view);
@@ -312,22 +328,22 @@ public class ShortcutBlurModule extends XposedModule {
         return flags;
     }
 
-    private void invalidateFlags(View view) {
+    private void clearBlurFlagsCache(View view) {
         if (view == null) return;
         synchronized (flagsCache) {
             flagsCache.remove(view);
         }
     }
 
-    private void makeBlurLive(View view, String mid) {
+    private void armBlurForView(View view, String mid) {
         if (view == null) return;
         try {
-            SBLog.d("LIVE", "makeBlurLive id=" + mid);
-            final int flags = flagsFor(view);
-            SBLog.d("LIVE", "flags=" + flags + " (static=" + ((flags & F_STATIC) != 0)
+            ModuleLog.d("LIVE", "armBlurForView id=" + mid);
+            final int flags = resolveBlurFlags(view);
+            ModuleLog.d("LIVE", "flags=" + flags + " (static=" + ((flags & F_STATIC) != 0)
                     + " icon=" + ((flags & F_ICON) != 0) + " wall=" + ((flags & F_WALL) != 0) + ")");
 
-            armIconBlur(view, true);
+            setIconBlurArmed(view, true);
 
             if ((flags & F_STATIC) != 0) clearStaticLayers(view);
 
@@ -346,34 +362,34 @@ public class ShortcutBlurModule extends XposedModule {
                     try {
                         Object launcher = getLauncherQuietly(fv);
                         if (launcher == null) {
-                            SBLog.d("DEPTH", "launcher null, skip retry");
+                            ModuleLog.d("DEPTH", "launcher null, skip retry");
                             return;
                         }
                         Object dc = invokeNoArgQuietly(launcher, "getDepthController");
                         if (dc == null) {
-                            SBLog.d("DEPTH", "depthController null");
+                            ModuleLog.d("DEPTH", "depthController null");
                             return;
                         }
                         Object g = invokeNoArgQuietly(dc, "getCurrentBlur");
                         float v = (g instanceof Float) ? (Float) g : -1f;
-                        SBLog.d("DEPTH", "currentBlur=" + v);
+                        ModuleLog.d("DEPTH", "currentBlur=" + v);
                         if (v <= 0.05f) {
                             boolean ok = setDepthBlur(fv, 1.0f);
-                            SBLog.d("DEPTH", "fallback setBlur=1 ok=" + ok);
+                            ModuleLog.d("DEPTH", "fallback setBlur=1 ok=" + ok);
                         }
                     } catch (Throwable t) {
-                        SBLog.e("DEPTH", "retry failed", t);
+                        ModuleLog.e("DEPTH", "retry failed", t);
                     }
                 }
             }, DEPTH_FALLBACK_DELAY);
         } catch (Throwable t) {
-            SBLog.e("LIVE", "makeBlurLive failed", t);
+            ModuleLog.e("LIVE", "armBlurForView failed", t);
         }
     }
 
     private void applyIconBlur(View view) {
         if (!isIconBlurArmed(view)) {
-            SBLog.d("ICONBLUR", "skipped: disarmed");
+            ModuleLog.d("ICONBLUR", "skipped: disarmed");
             return;
         }
         applyIconBlurRadius(view, BLUR_RADIUS);
@@ -383,7 +399,7 @@ public class ShortcutBlurModule extends XposedModule {
         applyIconBlurRadius(view, radius, true);
     }
 
-    private void dumpOplusOnce(Class<?> cls) {
+    private void dumpOplusApiOnce(Class<?> cls) {
         String key = cls.getName();
         synchronized (dumpedCls) {
             if (!dumpedCls.add(key)) return;
@@ -399,12 +415,12 @@ public class ShortcutBlurModule extends XposedModule {
                 }
                 sb.append(")->").append(m.getReturnType().getSimpleName()).append(" | ");
             }
-            SBLog.d("OPLUSDUMP", sb.toString());
+            ModuleLog.d("OPLUSDUMP", sb.toString());
             for (Field f : cls.getDeclaredFields()) {
                 try {
                     f.setAccessible(true);
                     Object val = java.lang.reflect.Modifier.isStatic(f.getModifiers()) ? f.get(null) : null;
-                    SBLog.d("OPLUSDUMP", "FIELD " + f.getName() + " type=" + f.getType().getSimpleName() + " val=" + val);
+                    ModuleLog.d("OPLUSDUMP", "FIELD " + f.getName() + " type=" + f.getType().getSimpleName() + " val=" + val);
                 } catch (Throwable ig) {}
             }
             for (Class<?> c = cls.getSuperclass(); c != null && c != Object.class; c = c.getSuperclass()) {
@@ -418,10 +434,10 @@ public class ShortcutBlurModule extends XposedModule {
                     }
                     s2.append(") | ");
                 }
-                SBLog.d("OPLUSDUMP", s2.toString());
+                ModuleLog.d("OPLUSDUMP", s2.toString());
             }
         } catch (Throwable t) {
-            SBLog.e("OPLUSDUMP", "dump failed", t);
+            ModuleLog.e("OPLUSDUMP", "dump failed", t);
         }
     }
 
@@ -431,31 +447,31 @@ public class ShortcutBlurModule extends XposedModule {
             RenderEffect effect = RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.MIRROR);
 
             if (!useOplus) {
-                tryViewSetRenderEffect(view, effect);
+                trySetViewRenderEffect(view, effect);
                 return;
             }
 
             boolean oplusOk = false;
             try {
-                Class<?> cls = forName(CLS_OPLUS_EFFECT, loader());
+                Class<?> cls = loadClass(CLS_OPLUS_EFFECT, currentClassLoader());
                 if (cls != null) {
-                    dumpOplusOnce(cls);
-                    Method m = getMethodCached(cls, "setBackgroundRenderEffect", RenderEffect.class, View.class);
+                    dumpOplusApiOnce(cls);
+                    Method m = findMethodCached(cls, "setBackgroundRenderEffect", RenderEffect.class, View.class);
                     if (m != null) {
                         m.invoke(null, effect, view);
                         oplusOk = true;
                     }
                 }
             } catch (Throwable t) {
-                SBLog.d("ICONBLUR", "oplus path failed: " + t);
+                ModuleLog.d("ICONBLUR", "oplus path failed: " + t);
             }
 
             if (!oplusOk) {
-                String err = tryViewSetRenderEffect(view, effect);
-                SBLog.d("ICONBLUR", "fallback setRenderEffect err=" + err);
+                String err = trySetViewRenderEffect(view, effect);
+                ModuleLog.d("ICONBLUR", "fallback setRenderEffect err=" + err);
             }
         } catch (Throwable t) {
-            SBLog.e("ICONBLUR", "applyIconBlurRadius failed", t);
+            ModuleLog.e("ICONBLUR", "applyIconBlurRadius failed", t);
         }
     }
 
@@ -473,7 +489,7 @@ public class ShortcutBlurModule extends XposedModule {
             String nowTarget = toRadius <= 0.01f ? "0" : "64";
             String prevTarget = animTargets.get(targetKey);
             if (prevTarget != null && prevTarget.equals(nowTarget)) {
-                SBLog.d("ICONANIM", "skip dup " + prevTarget);
+                ModuleLog.d("ICONANIM", "skip dup " + prevTarget);
                 return;
             }
             animTargets.put(targetKey, nowTarget);
@@ -486,7 +502,7 @@ public class ShortcutBlurModule extends XposedModule {
                 @Override
                 public void onAnimationUpdate(ValueAnimator a) {
                     try {
-                        if (!isCurrentAnim(key, va)) return;
+                        if (!isCurrentAnimation(key, va)) return;
                         float r = (Float) a.getAnimatedValue();
                         if (!Float.isNaN(last) && Math.abs(r - last) < 0.5f) return;
                         last = r;
@@ -496,7 +512,7 @@ public class ShortcutBlurModule extends XposedModule {
                         }
                         applyIconBlurRadius(view, r, true);
                     } catch (Throwable t) {
-                        SBLog.e("ICONANIM", "update failed", t);
+                        ModuleLog.e("ICONANIM", "update failed", t);
                     }
                 }
             });
@@ -504,7 +520,7 @@ public class ShortcutBlurModule extends XposedModule {
                 iconAnims.put(key, va);
             }
             va.start();
-            SBLog.d("ICONANIM", "anim " + fromRadius + "->" + toRadius + " dur=" + duration);
+            ModuleLog.d("ICONANIM", "anim " + fromRadius + "->" + toRadius + " dur=" + duration);
             final boolean[] finished = new boolean[]{false};
             view.postDelayed(new Runnable() {
                 @Override
@@ -512,8 +528,8 @@ public class ShortcutBlurModule extends XposedModule {
                     if (finished[0]) return;
                     finished[0] = true;
                     try {
-                        if (!isCurrentAnim(key, va)) return;
-                        removeAnim(key);
+                        if (!isCurrentAnimation(key, va)) return;
+                        removeAnimation(key);
                         if (!isIconBlurArmed(view)) {
                             clearIconBlur(view);
                             return;
@@ -525,12 +541,12 @@ public class ShortcutBlurModule extends XposedModule {
                             applyIconBlurRadius(view, toRadius, true);
                         }
                     } catch (Throwable t) {
-                        SBLog.e("ICONANIM", "finalize failed", t);
+                        ModuleLog.e("ICONANIM", "finalize failed", t);
                     }
                 }
             }, duration + 16L);
         } catch (Throwable t) {
-            SBLog.e("ICONANIM", "animateIconBlur failed", t);
+            ModuleLog.e("ICONANIM", "animateIconBlur failed", t);
             try {
                 if (toRadius <= 0.01f) clearIconBlur(view);
                 else applyIconBlurRadius(view, toRadius, true);
@@ -538,7 +554,7 @@ public class ShortcutBlurModule extends XposedModule {
         }
     }
 
-    private void armIconBlur(View view, boolean value) {
+    private void setIconBlurArmed(View view, boolean value) {
         if (view == null) return;
         synchronized (armed) {
             if (value) {
@@ -567,7 +583,7 @@ private RenderEffect getBlurEffect() {
 
     private void clearIconBlurByFlags(View v, int flags, String tag) {
         if ((flags & F_ICON_ANIM) != 0) {
-            SBLog.d("ICONANIM", "TEST " + tag);
+            ModuleLog.d("ICONANIM", "TEST " + tag);
             clearIconBlur(v);
         } else if ((flags & F_ICON) != 0) {
             clearIconBlur(v);
@@ -579,22 +595,22 @@ private RenderEffect getBlurEffect() {
             @Override
             public void run() {
                 try {
-                    if (tag != null) SBLog.d("ICONANIM", "TEST " + tag);
+                    if (tag != null) ModuleLog.d("ICONANIM", "TEST " + tag);
                     applyIconBlur(v);
                 } catch (Throwable t) {
-                    SBLog.e(tag != null ? "ICONANIM" : "ICONBLUR", "delayed apply failed", t);
+                    ModuleLog.e(tag != null ? "ICONANIM" : "ICONBLUR", "delayed apply failed", t);
                 }
             }
         }, ICON_BLUR_DELAY);
     }
 
-    private boolean isCurrentAnim(String key, ValueAnimator va) {
+    private boolean isCurrentAnimation(String key, ValueAnimator va) {
         synchronized (iconAnims) {
             return iconAnims.get(key) == va;
         }
     }
 
-    private void removeAnim(String key) {
+    private void removeAnimation(String key) {
         synchronized (iconAnims) {
             iconAnims.remove(key);
         }
@@ -609,43 +625,43 @@ private RenderEffect getBlurEffect() {
 
     private void clearIconBlur(View view) {
 
-        armIconBlur(view, false);
+        setIconBlurArmed(view, false);
         try {
-            Class<?> cls = forName(CLS_OPLUS_EFFECT, loader());
+            Class<?> cls = loadClass(CLS_OPLUS_EFFECT, currentClassLoader());
             if (cls != null) {
-                Method m = getMethodCached(cls, "setBackgroundRenderEffect", RenderEffect.class, View.class);
+                Method m = findMethodCached(cls, "setBackgroundRenderEffect", RenderEffect.class, View.class);
                 if (m != null) {
                     m.invoke(null, null, view);
-                    SBLog.d("CLEAR", "icon blur cleared via oplus");
+                    ModuleLog.d("CLEAR", "icon blur cleared via oplus");
                     return;
                 }
             }
         } catch (Throwable t) {
-            SBLog.e("CLEAR", "oplus clear failed", t);
+            ModuleLog.e("CLEAR", "oplus clear failed", t);
         }
         try {
-            Method m = getMethodCached(View.class, "setRenderEffect", RenderEffect.class);
+            Method m = findMethodCached(View.class, "setRenderEffect", RenderEffect.class);
             if (m != null) {
                 m.invoke(view, (Object) null);
-                SBLog.d("CLEAR", "icon blur cleared via View");
+                ModuleLog.d("CLEAR", "icon blur cleared via View");
             }
         } catch (Throwable t) {
-            SBLog.d("CLEAR", "icon blur clear failed: " + t);
+            ModuleLog.d("CLEAR", "icon blur clear failed: " + t);
         }
     }
 
     private void clearStaticLayers(View view) {
         try {
-            Class<?> drawableCls = forName(CLS_DRAWABLE, loader());
+            Class<?> drawableCls = loadClass(CLS_DRAWABLE, currentClassLoader());
             boolean wall = false;
             boolean drag = false;
 
             if (drawableCls != null) {
-                Method mw = getMethodCached(view.getClass(), "setWallpaperDrawable", drawableCls);
+                Method mw = findMethodCached(view.getClass(), "setWallpaperDrawable", drawableCls);
                 if (mw != null) {
                     try { mw.invoke(view, (Object) null); wall = true; } catch (Throwable ignore) {}
                 }
-                Method md = getMethodCached(view.getClass(), "setDragLayerDrawable", drawableCls);
+                Method md = findMethodCached(view.getClass(), "setDragLayerDrawable", drawableCls);
                 if (md != null) {
                     try { md.invoke(view, (Object) null); drag = true; } catch (Throwable ignore) {}
                 }
@@ -656,15 +672,15 @@ private RenderEffect getBlurEffect() {
                 try { f.setBoolean(view, true); } catch (Throwable ignore) {}
             }
             invokeNoArgQuietly(view, "invalidate");
-            SBLog.d("CLEAR", "staticLayers wall=" + wall + " drag=" + drag);
+            ModuleLog.d("CLEAR", "staticLayers wall=" + wall + " drag=" + drag);
         } catch (Throwable t) {
-            SBLog.e("CLEAR", "clearStaticLayers failed", t);
+            ModuleLog.e("CLEAR", "clearStaticLayers failed", t);
         }
     }
 
-    private String tryViewSetRenderEffect(View view, RenderEffect effect) {
+    private String trySetViewRenderEffect(View view, RenderEffect effect) {
         try {
-            Method m = getMethodCached(View.class, "setRenderEffect", RenderEffect.class);
+            Method m = findMethodCached(View.class, "setRenderEffect", RenderEffect.class);
             if (m == null) return "setRenderEffect not found";
             m.invoke(view, effect);
             return null;
@@ -673,7 +689,7 @@ private RenderEffect getBlurEffect() {
         }
     }
 
-    private Object newDepthBlurAnim(View view, float from, float to, long duration) {
+    private Object createDepthBlurAnimation(View view, float from, float to, long duration) {
         try {
             Object launcher = getLauncherQuietly(view);
             if (launcher == null) return null;
@@ -691,42 +707,42 @@ private RenderEffect getBlurEffect() {
                 }
             } catch (Throwable ignore) {}
 
-            Class<?> oaCls = forName(CLS_OBJECT_ANIMATOR, loader());
-            Class<?> propCls = forName(CLS_PROPERTY, loader());
+            Class<?> oaCls = loadClass(CLS_OBJECT_ANIMATOR, currentClassLoader());
+            Class<?> propCls = loadClass(CLS_PROPERTY, currentClassLoader());
             if (oaCls == null || propCls == null) return null;
 
-            Method ofFloat = getMethodCached(oaCls, "ofFloat", Object.class, propCls, float[].class);
+            Method ofFloat = findMethodCached(oaCls, "ofFloat", Object.class, propCls, float[].class);
             if (ofFloat == null) return null;
             Object anim = ofFloat.invoke(null, dc, prop, new float[]{cur, to});
             if (anim == null) return null;
 
-            Class<?> animCls = forName(CLS_ANIMATOR, loader());
+            Class<?> animCls = loadClass(CLS_ANIMATOR, currentClassLoader());
             if (animCls == null) return null;
 
-            Method setDur = getMethodCached(animCls, "setDuration", long.class);
+            Method setDur = findMethodCached(animCls, "setDuration", long.class);
             if (setDur != null) setDur.invoke(anim, duration);
 
-            Class<?> ipCls = forName(CLS_TIME_INTERPOLATOR, loader());
-            Class<?> decCls = forName(CLS_DECELERATE, loader());
+            Class<?> ipCls = loadClass(CLS_TIME_INTERPOLATOR, currentClassLoader());
+            Class<?> decCls = loadClass(CLS_DECELERATE, currentClassLoader());
             if (ipCls != null && decCls != null) {
                 Object decObj = newInstanceCached(decCls);
-                Method setI = getMethodCached(animCls, "setInterpolator", ipCls);
+                Method setI = findMethodCached(animCls, "setInterpolator", ipCls);
                 if (setI != null && decObj != null) setI.invoke(anim, decObj);
             }
             return anim;
         } catch (Throwable t) {
-            SBLog.e("ANIM", "newDepthBlurAnim failed", t);
+            ModuleLog.e("ANIM", "createDepthBlurAnimation failed", t);
             return null;
         }
     }
 
     private boolean animateDepthBlur(View view, float from, float to, long duration) {
         try {
-            Object anim = newDepthBlurAnim(view, from, to, duration);
+            Object anim = createDepthBlurAnimation(view, from, to, duration);
             if (anim != null) {
-                Class<?> animCls = forName(CLS_ANIMATOR, loader());
+                Class<?> animCls = loadClass(CLS_ANIMATOR, currentClassLoader());
                 if (animCls != null) {
-                    Method start = getMethodCached(animCls, "start");
+                    Method start = findMethodCached(animCls, "start");
                     if (start != null) {
                         start.invoke(anim);
                         return true;
@@ -739,12 +755,12 @@ private RenderEffect getBlurEffect() {
         }
     }
 
-    private void animatorSetPlay(Object set, Object anim) {
+    private void playIntoAnimatorSet(Object set, Object anim) {
         try {
-            Class<?> setCls = forName(CLS_ANIMATOR_SET, loader());
-            Class<?> animCls = forName(CLS_ANIMATOR, loader());
+            Class<?> setCls = loadClass(CLS_ANIMATOR_SET, currentClassLoader());
+            Class<?> animCls = loadClass(CLS_ANIMATOR, currentClassLoader());
             if (setCls == null || animCls == null) return;
-            Method play = getMethodCached(setCls, "play", animCls);
+            Method play = findMethodCached(setCls, "play", animCls);
             if (play != null) play.invoke(set, anim);
         } catch (Throwable t) {
         }
@@ -756,7 +772,7 @@ private RenderEffect getBlurEffect() {
             if (launcher == null) return false;
             Object dc = invokeNoArgQuietly(launcher, "getDepthController");
             if (dc == null) return false;
-            Method m = getMethodCached(dc.getClass(), "setBlurWithoutAnim", float.class);
+            Method m = findMethodCached(dc.getClass(), "setBlurWithoutAnim", float.class);
             if (m == null) return false;
             m.invoke(dc, value);
             return true;
@@ -765,7 +781,7 @@ private RenderEffect getBlurEffect() {
         }
     }
 
-    private Class<?> forName(String name, ClassLoader loader) {
+    private Class<?> loadClass(String name, ClassLoader loader) {
         if (loader == null) return null;
         String key = name + "@" + System.identityHashCode(loader);
         Class<?> cached = CLASS_CACHE.get(key);
@@ -779,7 +795,7 @@ private RenderEffect getBlurEffect() {
         }
     }
 
-    private static Method getMethodCached(Class<?> cls, String name, Class<?>... paramTypes) {
+    private static Method findMethodCached(Class<?> cls, String name, Class<?>... paramTypes) {
         StringBuilder sb = new StringBuilder(cls.getName()).append('#').append(name).append('(');
         for (Class<?> p : paramTypes) sb.append(p.getName()).append(',');
         sb.append(')');
@@ -841,7 +857,7 @@ private RenderEffect getBlurEffect() {
         try {
             return f.get(dc);
         } catch (Throwable t) {
-            SBLog.d("DEPTH", "BLUR field not static nor instance-accessible: " + t);
+            ModuleLog.d("DEPTH", "BLUR field not static nor instance-accessible: " + t);
             return null;
         }
     }
@@ -850,17 +866,17 @@ private RenderEffect getBlurEffect() {
         try {
             Context ctx = view.getContext();
             if (ctx == null) return null;
-            Class<?> lc = forName(CLS_LAUNCHER, loader());
+            Class<?> lc = loadClass(CLS_LAUNCHER, currentClassLoader());
             if (lc == null) return null;
 
-            Method g = getMethodCached(lc, "getLauncher", Context.class);
+            Method g = findMethodCached(lc, "getLauncher", Context.class);
             if (g != null) {
                 try {
                     Object r = g.invoke(null, ctx);
                     if (r != null) return r;
                 } catch (Throwable ignore) {}
             }
-            Method g2 = getMethodCached(lc, "getLauncherOrNull", Context.class);
+            Method g2 = findMethodCached(lc, "getLauncherOrNull", Context.class);
             if (g2 != null) {
                 try {
                     Object r2 = g2.invoke(null, ctx);
@@ -875,7 +891,7 @@ private RenderEffect getBlurEffect() {
 
     private Object invokeNoArgQuietly(Object target, String name) {
         try {
-            Method m = getMethodCached(target.getClass(), name);
+            Method m = findMethodCached(target.getClass(), name);
             if (m == null) return null;
             return m.invoke(target);
         } catch (Throwable t) {
@@ -898,28 +914,28 @@ private RenderEffect getBlurEffect() {
         try {
             cls = Class.forName(CLS_EA, false, loader);
         } catch (Throwable t) {
-            SBLog.e("INSTALL", "class not found: " + CLS_EA, t);
+            ModuleLog.e("INSTALL", "class not found: " + CLS_EA, t);
             return false;
         }
-        SBLog.i("INSTALL class loaded: " + cls.getName());
+        ModuleLog.i("INSTALL class loaded: " + cls.getName());
         int critical = 0;
-        critical += hookBySig(cls, "c",
+        critical += hookBySignature(cls, "c",
                 new String[]{ "android.view.SurfaceControl", "java.lang.Float", "java.lang.Integer", "java.lang.Long" },
                 "c");
-        critical += hookBySig(cls, "e",
+        critical += hookBySignature(cls, "e",
                 new String[]{ "android.view.SurfaceControl", "java.lang.Float", "java.lang.Integer", "java.lang.Long" },
                 "e");
-        critical += hookBySig(cls, "d",
+        critical += hookBySignature(cls, "d",
                 new String[]{ "android.view.SurfaceControl", "float", "int", "long" },
                 "d");
-        critical += hookBySig(cls, "f",
+        critical += hookBySignature(cls, "f",
                 new String[]{ "float", "int", "long" },
                 "f");
-        SBLog.i("READY posteffect installed critical=" + critical);
+        ModuleLog.i("READY posteffect installed critical=" + critical);
         return critical > 0;
     }
 
-    private int hookBySig(Class<?> cls, String methodName, String[] wantParams, String tag) {
+    private int hookBySignature(Class<?> cls, String methodName, String[] wantParams, String tag) {
         Method target = null;
         StringBuilder all = new StringBuilder();
         for (Method m : cls.getDeclaredMethods()) {
@@ -939,7 +955,7 @@ private RenderEffect getBlurEffect() {
             if (ok) { target = m; break; }
         }
         if (target == null) {
-            SBLog.e("INSTALL", "method not found: " + methodName + " | declared: " + all, null);
+            ModuleLog.e("INSTALL", "method not found: " + methodName + " | declared: " + all, null);
             return 0;
         }
         final Method m = target;
@@ -947,36 +963,36 @@ private RenderEffect getBlurEffect() {
         try {
             m.setAccessible(true);
             if (!peHooked.add(m)) {
-                SBLog.d("INSTALL", "skip dup hook " + cls.getName() + "." + methodName);
+                ModuleLog.d("INSTALL", "skip dup hook " + cls.getName() + "." + methodName);
                 return 0;
             }
             this.hook(m)
                     .setPriority(XposedInterface.PRIORITY_DEFAULT)
                     .intercept(chain -> {
                         Object[] args = chain.getArgs().toArray();
-                        int pos = findFloatIndex(paramTypes);
+                        int pos = findFloatParamIndex(paramTypes);
                         if (pos >= 0 && pos < args.length && args[pos] instanceof Number) {
                             float old = ((Number) args[pos]).floatValue();
                             if (old != SAMPLE_SCALE) {
                                 args[pos] = SAMPLE_SCALE;
-                                SBLog.d("SCALE", tag + " " + old + " -> " + SAMPLE_SCALE);
+                                ModuleLog.d("SCALE", tag + " " + old + " -> " + SAMPLE_SCALE);
                             } else {
-                                SBLog.d("SCALE", tag + " keep " + old);
+                                ModuleLog.d("SCALE", tag + " keep " + old);
                             }
                         } else {
-                            SBLog.d("SCALE", tag + " no float arg (pos=" + pos + ")");
+                            ModuleLog.d("SCALE", tag + " no float arg (pos=" + pos + ")");
                         }
                         return chain.proceed(args);
                     });
-            SBLog.i("INSTALL hooked " + cls.getName() + "." + methodName + " (" + tag + ")");
+            ModuleLog.i("INSTALL hooked " + cls.getName() + "." + methodName + " (" + tag + ")");
             return 1;
         } catch (Throwable t) {
-            SBLog.e("INSTALL", "hook failed: " + cls.getName() + "." + methodName, t);
+            ModuleLog.e("INSTALL", "hook failed: " + cls.getName() + "." + methodName, t);
             return 0;
         }
     }
 
-    private int findFloatIndex(Class<?>[] types) {
+    private int findFloatParamIndex(Class<?>[] types) {
         int idx = -1;
         for (int i = 0; i < types.length; i++) {
             Class<?> t = types[i];
@@ -991,7 +1007,7 @@ private RenderEffect getBlurEffect() {
         try {
             ViewGroup dragLayer = findDragLayer(view);
             if (dragLayer == null) {
-                SBLog.d("FOLDER", "no dragLayer found, chain=" + chainNames(view));
+                ModuleLog.d("FOLDER", "no dragLayer found, chain=" + dumpViewChainNames(view));
                 return false;
             }
             for (int i = 0; i < dragLayer.getChildCount(); i++) {
@@ -1001,14 +1017,14 @@ private RenderEffect getBlurEffect() {
                     float a = c.getAlpha();
                     int vis = c.getVisibility();
                     boolean inFolder = (a < 0.9f) || (vis != View.VISIBLE);
-                    SBLog.d("FOLDER", "workspace vis=" + vis + " alpha=" + a + " -> inFolder=" + inFolder);
+                    ModuleLog.d("FOLDER", "workspace vis=" + vis + " alpha=" + a + " -> inFolder=" + inFolder);
                     return inFolder;
                 }
             }
-            SBLog.d("FOLDER", "no workspace child, dragLayer children=" + childNames(dragLayer));
+            ModuleLog.d("FOLDER", "no workspace child, dragLayer children=" + dumpChildViewNames(dragLayer));
             return false;
         } catch (Throwable t) {
-            SBLog.e("FOLDER", "isInsideOpenFolder failed", t);
+            ModuleLog.e("FOLDER", "isInsideOpenFolder failed", t);
             return false;
         }
     }
@@ -1027,7 +1043,7 @@ private RenderEffect getBlurEffect() {
         return null;
     }
 
-    private String chainNames(View view) {
+    private String dumpViewChainNames(View view) {
         StringBuilder sb = new StringBuilder();
         try {
             ViewParent p = view.getParent();
@@ -1041,7 +1057,7 @@ private RenderEffect getBlurEffect() {
         return sb.toString();
     }
 
-    private String childNames(ViewGroup vg) {
+    private String dumpChildViewNames(ViewGroup vg) {
         StringBuilder sb = new StringBuilder();
         try {
             for (int i = 0; i < vg.getChildCount(); i++) {
@@ -1051,7 +1067,74 @@ private RenderEffect getBlurEffect() {
         return sb.toString();
     }
 
-    private ClassLoader loader() {
+    private ClassLoader currentClassLoader() {
         return cl;
     }
+    // ===================== [merge] blur test 并入部分 =====================
+
+    private void hookRemoteViewsApply(ClassLoader cl) {
+        try {
+            Method m = RemoteViews.class.getDeclaredMethod("apply", android.content.Context.class, ViewGroup.class);
+            hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(new RemoteViewsApplyHook(cl));
+            ModuleLog.i("[merge] hooked RemoteViews.apply");
+        } catch (Throwable t) {
+            ModuleLog.e("MERGE", "RemoteViews.apply hook fail", t);
+        }
+    }
+
+    private void hookAppWidgetHostView(ClassLoader cl) {
+        try {
+            Class<?> ahv = Class.forName("android.appwidget.AppWidgetHostView", false, cl);
+            for (Method m : ahv.getDeclaredMethods()) {
+                if (m.getName().equals("updateAppWidget")) {
+                    hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(new AppWidgetHostViewHook(cl));
+                    ModuleLog.i("[merge] hooked AppWidgetHostView.updateAppWidget");
+                }
+            }
+        } catch (Throwable t) {
+            ModuleLog.e("MERGE", "AppWidgetHostView hook fail", t);
+        }
+    }
+
+    private static final class RemoteViewsApplyHook implements XposedInterface.Hooker {
+        private final ClassLoader cl;
+        RemoteViewsApplyHook(ClassLoader c) { this.cl = c; }
+        @Override
+        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            Object result = chain.proceed();
+            try {
+                java.util.List<Object> args = chain.getArgs();
+                Object vg = args.size() > 1 ? args.get(1) : null;
+                if (vg instanceof ViewGroup) {
+                    WidgetBlurAttacher.attach("[apply]", (View) vg, cl);
+                }
+            } catch (Throwable t) {
+                ModuleLog.e("MERGE", "apply post fail", t);
+            }
+            return result;
+        }
+    }
+
+    private static final class AppWidgetHostViewHook implements XposedInterface.Hooker {
+        private final ClassLoader cl;
+        AppWidgetHostViewHook(ClassLoader c) { this.cl = c; }
+        @Override
+        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            Object self = chain.getThisObject();
+            Object result = chain.proceed();
+            try {
+                if (self instanceof View) {
+                    View v = (View) self;
+                    if (v instanceof ViewGroup) {
+                        WidgetBlurAttacher.attach("[ahv]", v, cl);
+                    }
+                    GlyphBlurRenderer.onWidgetUpdated(v);
+                }
+            } catch (Throwable t) {
+                ModuleLog.e("MERGE", "ahv post fail", t);
+            }
+            return result;
+        }
+    }
+
 }
