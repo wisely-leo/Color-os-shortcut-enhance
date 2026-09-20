@@ -7,15 +7,13 @@ import java.lang.reflect.Method;
 public class WidgetBlurAttacher {
 
     private static final int TYPE_WIDGET = 7;
-    private static final int TARGET_ROOT = 0x7f0a017b;
-    private static final int CONTAINER_ID = 0x7f0a02ab;
+
+    private static final long ATTACH_RETRY_MS = 120L;
+    private static final int ATTACH_MAX_RETRY = 8;
 
     private static final java.util.WeakHashMap<View, Boolean> sDone = new java.util.WeakHashMap<View, Boolean>();
 
     private static final java.util.WeakHashMap<View, View> sDoneHost = new java.util.WeakHashMap<View, View>();
-
-    private static final long ATTACH_RETRY_MS = 120L;
-    private static final int ATTACH_MAX_RETRY = 8;
 
     private static final java.util.WeakHashMap<View, Boolean> sGaveUp = new java.util.WeakHashMap<View, Boolean>();
 
@@ -30,7 +28,7 @@ public class WidgetBlurAttacher {
         if (root == null) return;
         try {
             View host = ViewUtils.ancestorOfType(root, "AppWidgetHostView");
-            View containerEarly = ViewUtils.findByViewId(root, TARGET_ROOT);
+            View containerEarly = ViewUtils.findByViewId(root, ClockIds.TARGET_ROOT);
             boolean hasT = (containerEarly != null);
             if (hasT) {
                 synchronized (sEverHit) { sEverHit.put(root, Boolean.TRUE); }
@@ -47,7 +45,7 @@ public class WidgetBlurAttacher {
             if (launcher == null) { ModuleLog.e("BW", "no launcher", null); return; }
 
             View container = containerEarly;
-            if (container == null) { container = ViewUtils.findByViewId(root, CONTAINER_ID); }
+            if (container == null) { container = ViewUtils.findByViewId(root, ClockIds.CONTAINER); }
             if (container == null) {
                 if (attempt < ATTACH_MAX_RETRY && root != null) {
                     root.postDelayed(new Runnable() {

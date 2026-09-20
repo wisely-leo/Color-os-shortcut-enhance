@@ -12,28 +12,29 @@ import java.lang.reflect.Proxy;
 public class GlyphBlurRenderer {
 
     private static final int MAX_RETRY = 12;
+
     private static final float GLYPH_DY = 0.0f;
     private static final long RETRY_DELAY_MS = 120L;
+
     private static final long POLL_INTERVAL_ON_MS = 500L;
+
     private static final long POLL_INTERVAL_OFF_MS = 3000L;
+
     private static final long POLL_INTERVAL_HIDDEN_MS = 1500L;
+
     private static final long POLL_INTERVAL_MAX_MS = 2000L;
+
     private static final long POLL_INTERVAL_TICK_MS = 500L;
+
     private static final int  POLL_STABLE_THRESHOLD = 6;
 
-    private static final int ID_HOUR    = 0x7f0a02cf;
-    private static final int ID_COLON   = 0x7f0a02c8;
-    private static final int ID_MINUTES = 0x7f0a02d3;
-    private static final int ID_DATE    = 0x7f0a02ca;
-    private static final int ID_WEATHER = 0x7f0a02da;
-    private static final int ID_WEEK    = 0x7f0a02db;
-    private static final int ID_WEATHER2   = 0x7f0a02d6;
-    private static final int ID_LUNAR   = 0x7f0a02cb;
-
-    private static final int ID_WEATHER_IMG1 = 0x7f0a02d9;
-    private static final int ID_WEATHER_IMG2 = 0x7f0a0276;
-
     private static final float ICON_ALPHA = 0.30f;
+
+    private static final int ICON_ALPHA_THRESHOLD = 40;
+
+    private static final int ICON_SAMPLE_MAX_W = 96;
+
+    private static final float BRIGHTEN_GAIN = 1.25f;
 
     private static final class GlyphSnapshot {
         final Path localPath;
@@ -128,18 +129,78 @@ public class GlyphBlurRenderer {
 
             Method setPP = Reflect.method(blurDrawable.getClass(), "setPathProvider", 1);
             if (setPP == null) { ModuleLog.e("GB", "setPathProvider not found", null); return; }
-            setPP.setAccessible(true);
             setPP.invoke(blurDrawable, provider);
             ModuleLog.d("GB", "setPathProvider ok");
 
             installRefreshPoller(container, blurDrawable);
+            applyClockBrighten(container);
 
             Method inv = Reflect.method(blurDrawable.getClass(), "invalidatePath", 0);
-            if (inv != null) { inv.setAccessible(true); inv.invoke(blurDrawable); ModuleLog.d("GB", "invalidatePath ok"); }
+            if (inv != null) { inv.invoke(blurDrawable); ModuleLog.d("GB", "invalidatePath ok"); }
             container.invalidate();
             ModuleLog.d("GB", "done container");
         } catch (Throwable t) {
             ModuleLog.e("GB", "tryAttachOnce fail attempt=" + attempt, t);
+        }
+    }
+
+    private static volatile Method sSetRenderEffectMethod;
+    private static volatile android.graphics.RenderEffect sBrightenEffect;
+    private static volatile boolean sBrightenBuildFailed;
+    private static volatile boolean sBrightenLogged;
+
+    private static android.graphics.RenderEffect buildBrightenEffect() {
+        if (sBrightenEffect != null) return sBrightenEffect;
+        if (sBrightenBuildFailed) return null;
+
+        final float gain = BRIGHTEN_GAIN;
+        float[] m = new float[] {
+                gain, 0f,   0f,   0f, 0f,
+                0f,   gain, 0f,   0f, 0f,
+                0f,   0f,   gain, 0f, 0f,
+                0f,   0f,   0f,   1f, 0f
+        };
+        try {
+            android.graphics.ColorMatrix cm = new android.graphics.ColorMatrix(m);
+            android.graphics.ColorFilter cf = new android.graphics.ColorMatrixColorFilter(cm);
+            Method cmf = android.graphics.RenderEffect.class.getMethod(
+                    "createColorFilterEffect", android.graphics.ColorFilter.class);
+            sBrightenEffect = (android.graphics.RenderEffect) cmf.invoke(null, cf);
+            return sBrightenEffect;
+        } catch (Throwable t) {
+            sBrightenBuildFailed = true;
+            ModuleLog.e("BRIGHT", "buildBrightenEffect fail", t);
+            return null;
+        }
+    }
+
+    private static Method findSetRenderEffect(View container) {
+        Method cached = sSetRenderEffectMethod;
+        if (cached != null) return cached;
+        Class<?> target = android.view.View.class;
+        try {
+            cached = target.getMethod("setRenderEffect", android.graphics.RenderEffect.class);
+            cached.setAccessible(true);
+            sSetRenderEffectMethod = cached;
+            return cached;
+        } catch (Throwable t) {
+            ModuleLog.e("BRIGHT", "View.setRenderEffect NOT FOUND", t);
+            return null;
+        }
+    }
+
+    static void applyClockBrighten(View container) {
+        if (container == null) return;
+        try {
+            android.graphics.RenderEffect effect = buildBrightenEffect();
+            if (effect == null) return;
+            Method setRE = findSetRenderEffect(container);
+            if (setRE == null) return;
+
+            setRE.invoke(container, effect);
+            if (!sBrightenLogged) { sBrightenLogged = true; ModuleLog.d("BRIGHT", "applied gain=" + BRIGHTEN_GAIN); }
+        } catch (Throwable t) {
+            ModuleLog.e("BRIGHT", "applyClockBrighten fail", t);
         }
     }
 
@@ -182,7 +243,7 @@ public class GlyphBlurRenderer {
     }
 
     private static void appendWeatherIconSnapshots(View container, View base, java.util.ArrayList<GlyphSnapshot> list) {
-        int[] iconIds = { ID_WEATHER_IMG1, ID_WEATHER_IMG2 };
+        int[] iconIds = ClockIds.ICON_IDS;
         for (int id : iconIds) {
             try {
                 View v = container.findViewById(id);
@@ -211,13 +272,13 @@ public class GlyphBlurRenderer {
                     }
                 }
 
-                int bw = Math.min(bmp.getWidth(), 96);
+                int bw = Math.min(bmp.getWidth(), ICON_SAMPLE_MAX_W);
                 int bh = Math.max(1, bmp.getHeight() * bw / bmp.getWidth());
                 android.graphics.Bitmap small = android.graphics.Bitmap.createScaledBitmap(bmp, bw, bh, true);
                 int[] px = new int[bw * bh];
                 small.getPixels(px, 0, bw, 0, 0, bw, bh);
                 android.graphics.Region region = new android.graphics.Region();
-                int alphaThreshold = 40;
+                int alphaThreshold = ICON_ALPHA_THRESHOLD;
                 for (int y = 0; y < bh; y++) {
                     int runStart = -1;
                     for (int x = 0; x < bw; x++) {
@@ -274,7 +335,7 @@ public class GlyphBlurRenderer {
     }
     static void applyIconAlpha(View container) {
         try {
-            int[] iconIds = { ID_WEATHER_IMG1, ID_WEATHER_IMG2 };
+            int[] iconIds = ClockIds.ICON_IDS;
             for (int id : iconIds) {
                 View v = container.findViewById(id);
                 if (v == null) {
@@ -294,7 +355,7 @@ public class GlyphBlurRenderer {
         try {
 
             final View base = container;
-            int[] ids = { ID_HOUR, ID_COLON, ID_MINUTES, ID_DATE, ID_WEATHER, ID_WEEK, ID_WEATHER2, ID_LUNAR };
+            int[] ids = ClockIds.TEXT_IDS;
             java.util.ArrayList<GlyphSnapshot> list = new java.util.ArrayList<GlyphSnapshot>();
             for (int id : ids) {
 
@@ -428,11 +489,11 @@ public class GlyphBlurRenderer {
 
         private boolean isClockContainer() {
             try {
-                View v = container.findViewById(ID_HOUR);
+                View v = container.findViewById(ClockIds.HOUR);
                 if (v instanceof TextView) return true;
                 View root = ViewUtils.descendantJustBelow(container, "AppWidgetHostView");
                 if (root != null) {
-                    View v2 = root.findViewById(ID_HOUR);
+                    View v2 = root.findViewById(ClockIds.HOUR);
                     if (v2 instanceof TextView) return true;
                 }
             } catch (Throwable ignored) {}
@@ -478,6 +539,8 @@ public class GlyphBlurRenderer {
                     }
                     stableCount = 0;
                     intervalMs = POLL_INTERVAL_TICK_MS;
+
+                    applyClockBrighten(container);
                 } else {
                     stableCount++;
                     if (stableCount >= POLL_STABLE_THRESHOLD && intervalMs < POLL_INTERVAL_MAX_MS) {
@@ -494,7 +557,7 @@ public class GlyphBlurRenderer {
 
         private boolean pollOnce() {
             StringBuilder sb = new StringBuilder();
-            int[] ids = { ID_HOUR, ID_COLON, ID_MINUTES, ID_DATE, ID_WEATHER, ID_WEEK, ID_WEATHER2, ID_LUNAR };
+            int[] ids = ClockIds.TEXT_IDS;
             for (int id : ids) {
                 View v = container.findViewById(id);
                 if (!(v instanceof TextView)) {

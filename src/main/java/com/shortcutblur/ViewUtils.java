@@ -75,13 +75,17 @@ public final class ViewUtils {
     }
 
     public static View findByViewId(View root, int id) {
-        if (root == null) return null;
+        return findByViewId(root, id, 0);
+    }
+
+    private static View findByViewId(View root, int id, int depth) {
+        if (root == null || depth > MAX_DEPTH) return null;
         if (root.getId() == id) return root;
         if (root instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) root;
             int n = g.getChildCount();
             for (int i = 0; i < n; i++) {
-                View r = findByViewId(g.getChildAt(i), id);
+                View r = findByViewId(g.getChildAt(i), id, depth + 1);
                 if (r != null) return r;
             }
         }

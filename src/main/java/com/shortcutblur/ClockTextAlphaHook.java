@@ -10,26 +10,32 @@ import io.github.libxposed.api.XposedModule;
 
 public final class ClockTextAlphaHook {
 
-    private static final int ID_HOUR    = 0x7f0a02cf;
-    private static final int ID_COLON   = 0x7f0a02c8;
-    private static final int ID_MINUTES = 0x7f0a02d3;
-    private static final int ID_DATE    = 0x7f0a02ca;
-    private static final int ID_WEATHER = 0x7f0a02da;
-    private static final int ID_WEEK    = 0x7f0a02db;
-    private static final int ID_WEATHER2   = 0x7f0a02d6;
-    private static final int ID_LUNAR   = 0x7f0a02cb;
-
     private static final int TARGET_ALPHA = 0x4D;
+
+    private static volatile boolean sInstalled = false;
 
     private ClockTextAlphaHook() {}
 
+    private static boolean isClockTextId(int id) {
+        for (int tid : ClockIds.TEXT_IDS) {
+            if (tid == id) return true;
+        }
+        return false;
+    }
+
     public static void install(XposedModule mod, ClassLoader cl) {
+        if (sInstalled) return;
+        synchronized (ClockTextAlphaHook.class) {
+            if (sInstalled) return;
+            sInstalled = true;
+        }
         try {
             Class<?> rv = Class.forName("android.widget.RemoteViews", false, cl);
             Method m = rv.getDeclaredMethod("setTextColor", int.class, int.class);
             mod.hook(m).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(new HookColor());
             ModuleLog.d("CTCH", "hooked RemoteViews.setTextColor");
         } catch (Throwable t) {
+            sInstalled = false;
             ModuleLog.e("CTCH", "hook fail", t);
         }
     }
@@ -45,7 +51,7 @@ public final class ClockTextAlphaHook {
                     if (a0 instanceof Integer && a1 instanceof Integer) {
                         int id = (Integer) a0;
                         int color = (Integer) a1;
-                        if (id == ID_HOUR || id == ID_COLON || id == ID_MINUTES || id == ID_DATE || id == ID_WEATHER || id == ID_WEEK || id == ID_WEATHER2 || id == ID_LUNAR) {
+                        if (isClockTextId(id)) {
                             int newColor = (color & 0x00FFFFFF) | (TARGET_ALPHA << 24);
                             try { GlyphBlurRenderer.notifyContentMaybeChangedAll(); } catch (Throwable ignored) {}
                             ModuleLog.d("CTCH", "setTextColor id=0x" + Integer.toHexString(id)

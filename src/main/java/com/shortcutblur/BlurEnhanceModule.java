@@ -1101,9 +1101,16 @@ private RenderEffect getBlurEffect() {
                     ModuleLog.i("[merge] hooked AppWidgetHostView.updateAppWidget");
                 }
             }
-        } catch (Throwable t) {
+} catch (Throwable t) {
             ModuleLog.e("MERGE", "AppWidgetHostView hook fail", t);
         }
+    }
+
+    private static boolean isClockTextId(int id) {
+        for (int tid : ClockIds.TEXT_IDS) {
+            if (tid == id) return true;
+        }
+        return false;
     }
 
     private void hookAllSetText(Class<?> tvClass) {
@@ -1118,7 +1125,7 @@ private RenderEffect getBlurEffect() {
                             if (self instanceof android.widget.TextView) {
                                 android.widget.TextView t = (android.widget.TextView) self;
                                 int id = t.getId();
-                                if (id == 0x7f0a02cf || id == 0x7f0a02c8 || id == 0x7f0a02d3 || id == 0x7f0a02ca || id == 0x7f0a02da || id == 0x7f0a02db || id == 0x7f0a02d6 || id == 0x7f0a02cb) {
+                                if (isClockTextId(id)) {
                                     CharSequence cs = t.getText();
                                     String now = cs == null ? "" : cs.toString();
                                     String key = Integer.toHexString(id) + ":" + now;

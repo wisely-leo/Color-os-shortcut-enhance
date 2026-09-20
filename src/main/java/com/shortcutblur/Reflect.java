@@ -10,11 +10,19 @@ public final class Reflect {
 
     private static final int MAX_DEPTH = 16;
 
+    private static final int MAX_CACHE = 512;
+
     private static final Map<String, Method> METHOD_CACHE = new ConcurrentHashMap<>();
     private static final Map<String, Field> FIELD_CACHE = new ConcurrentHashMap<>();
     private static final Map<String, Constructor<?>> CTOR_CACHE = new ConcurrentHashMap<>();
 
     private Reflect() {}
+
+    private static void capCache(Map<?, ?> cache) {
+        if (cache.size() > MAX_CACHE) {
+            try { cache.clear(); } catch (Throwable ignored) {}
+        }
+    }
 
     public static Method method(Class<?> c, String name, int paramCount) {
         if (c == null || name == null) return null;
@@ -29,6 +37,7 @@ public final class Reflect {
                     if (m.getName().equals(name) && m.getParameterTypes().length == paramCount) {
                         m.setAccessible(true);
                         METHOD_CACHE.put(key, m);
+                        capCache(METHOD_CACHE);
                         return m;
                     }
                 }
@@ -51,6 +60,7 @@ public final class Reflect {
             Method m = c.getMethod(name, paramTypes);
             m.setAccessible(true);
             METHOD_CACHE.put(key, m);
+            capCache(METHOD_CACHE);
             return m;
         } catch (Throwable t) {
             return null;
@@ -68,6 +78,7 @@ public final class Reflect {
                 Field f = k.getDeclaredField(name);
                 f.setAccessible(true);
                 FIELD_CACHE.put(key, f);
+                capCache(FIELD_CACHE);
                 return f;
             } catch (NoSuchFieldException nsf) {
                 k = k.getSuperclass();
@@ -87,6 +98,7 @@ public final class Reflect {
                 ctor = c.getDeclaredConstructor();
                 ctor.setAccessible(true);
                 CTOR_CACHE.put(key, ctor);
+                capCache(CTOR_CACHE);
             }
             return ctor.newInstance();
         } catch (Throwable t) {
